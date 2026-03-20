@@ -328,3 +328,53 @@ class StressTransition(Transition):
             scene=scene,
             glow=GlowOverlay(x=curve.x, y=curve.y, artist_kwargs=glow_style),
         )
+
+
+@dataclass(frozen=True)
+class JitterTransition(Transition):
+    curve_id: str
+    x_amplitude: float = 0.0
+    y_amplitude: float = 0.02
+    cycles: float = 10.0
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.x_amplitude < 0.0 or self.y_amplitude < 0.0:
+            raise ValueError("Jitter amplitudes must be non-negative.")
+        if self.cycles <= 0.0:
+            raise ValueError("cycles must be positive.")
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        return self._perturbed_scene(scene, progress)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene
+
+    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+        return FrameState(scene=self._perturbed_scene(scene, progress))
+
+    def _perturbed_scene(self, scene: Scene, progress: float) -> Scene:
+        curve = scene.get_curve(self.curve_id)
+        if curve.is_empty:
+            return scene
+
+        envelope = float(np.sin(np.pi * _clamp_progress(progress)))
+        if envelope <= 0.0 or (self.x_amplitude == 0.0 and self.y_amplitude == 0.0):
+            return scene
+
+        oscillation = 2.0 * np.pi * self.cycles * _clamp_progress(progress)
+        spatial = np.linspace(0.0, 2.0 * np.pi, curve.x.size)
+        rng = np.random.default_rng(self.seed)
+        phase_x = float(rng.uniform(0.0, 2.0 * np.pi))
+        phase_y = float(rng.uniform(0.0, 2.0 * np.pi))
+
+        x_offset = envelope * self.x_amplitude * np.sin(oscillation + 2.0 * spatial + phase_x)
+        y_offset = envelope * self.y_amplitude * np.sin(
+            1.3 * oscillation + 3.0 * spatial + phase_y
+        )
+
+        perturbed_curve = curve.copy_with(
+            x=np.clip(curve.x + x_offset, 0.0, 1.0),
+            y=np.clip(curve.y + y_offset, 0.0, 1.0),
+        )
+        return scene.update_curve(perturbed_curve)
