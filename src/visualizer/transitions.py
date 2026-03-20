@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import numpy.typing as npt
+from matplotlib.colors import to_hex, to_rgb
 
 from .scene import (
     Curve,
@@ -17,6 +18,54 @@ from .scene import (
     _coerce_unit_interval_array,
     _validate_alpha,
 )
+
+
+def _interpolate_float(start: float, end: float, progress: float) -> float:
+    t = _clamp_progress(progress)
+    return float(start + (end - start) * t)
+
+
+def _interpolate_color(start_color: Any, end_color: Any, progress: float) -> str:
+    t = _clamp_progress(progress)
+    start_rgb = np.asarray(to_rgb(start_color), dtype=float)
+    end_rgb = np.asarray(to_rgb(end_color), dtype=float)
+    return to_hex(start_rgb + (end_rgb - start_rgb) * t)
+
+
+def _current_curve_color(curve: Curve) -> Any:
+    return curve.mpl_line_kwargs().get("color", "#1f77b4")
+
+
+def _current_fill_color(fill: FillBetweenArea) -> Any:
+    return fill.mpl_fill_kwargs().get("color", "#1f77b4")
+
+
+def _current_curve_alpha(curve: Curve) -> float:
+    style = curve.mpl_line_kwargs()
+    alpha = style.get("alpha")
+    if alpha is None:
+        return 1.0
+    return float(alpha)
+
+
+def _current_fill_alpha(fill: FillBetweenArea) -> float:
+    style = fill.mpl_fill_kwargs()
+    alpha = style.get("alpha")
+    if alpha is None:
+        return 1.0
+    return float(alpha)
+
+
+def _current_curve_linewidth(curve: Curve) -> float:
+    style = curve.mpl_line_kwargs()
+    linewidth = style.get("linewidth", 1.5)
+    return float(linewidth)
+
+
+def _current_fill_linewidth(fill: FillBetweenArea) -> float:
+    style = fill.mpl_fill_kwargs()
+    linewidth = style.get("linewidth", 1.0)
+    return float(linewidth)
 
 
 @dataclass(frozen=True)
@@ -50,8 +99,8 @@ class GlowOverlay:
 @dataclass(frozen=True)
 class FrameState:
     scene: Scene
-    pointer: PointerOverlay | None = None
-    glow: GlowOverlay | None = None
+    pointers: tuple[PointerOverlay, ...] = ()
+    glows: tuple[GlowOverlay, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,6 +117,38 @@ class Transition(ABC):
 
     def frame_state(self, scene: Scene, progress: float) -> FrameState:
         return FrameState(scene=self.interpolate(scene, progress))
+
+
+@dataclass(frozen=True)
+class ParallelTransition(Transition):
+    transitions: tuple[Transition, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "transitions", tuple(self.transitions))
+        if not self.transitions:
+            raise ValueError("ParallelTransition requires at least one child transition.")
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        return self.frame_state(scene, progress).scene
+
+    def apply(self, scene: Scene) -> Scene:
+        current_scene = scene
+        for transition in self.transitions:
+            current_scene = transition.apply(current_scene)
+        return current_scene
+
+    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+        current_scene = scene
+        pointers: list[PointerOverlay] = []
+        glows: list[GlowOverlay] = []
+
+        for transition in self.transitions:
+            state = transition.frame_state(current_scene, progress)
+            current_scene = state.scene
+            pointers.extend(state.pointers)
+            glows.extend(state.glows)
+
+        return FrameState(scene=current_scene, pointers=tuple(pointers), glows=tuple(glows))
 
 
 @dataclass(frozen=True)
@@ -93,7 +174,7 @@ class DrawTransition(Transition):
 
     def frame_state(self, scene: Scene, progress: float) -> FrameState:
         in_between_scene = self.interpolate(scene, progress)
-        pointer = None
+        pointers: tuple[PointerOverlay, ...] = ()
 
         if self.show_pointer:
             partial_curve = in_between_scene.get_curve(self.curve.curve_id)
@@ -110,13 +191,15 @@ class DrawTransition(Transition):
                     "zorder": curve_style.get("zorder", 2.0) + 0.5,
                 }
                 pointer_style.update(self.pointer_kwargs)
-                pointer = PointerOverlay(
-                    x=float(partial_curve.x[-1]),
-                    y=float(partial_curve.y[-1]),
-                    artist_kwargs=pointer_style,
+                pointers = (
+                    PointerOverlay(
+                        x=float(partial_curve.x[-1]),
+                        y=float(partial_curve.y[-1]),
+                        artist_kwargs=pointer_style,
+                    ),
                 )
 
-        return FrameState(scene=in_between_scene, pointer=pointer)
+        return FrameState(scene=in_between_scene, pointers=pointers)
 
 
 @dataclass(frozen=True)
@@ -284,6 +367,118 @@ class MoveFillBetweenTransition(Transition):
 
 
 @dataclass(frozen=True)
+class CurveStyleTransition(Transition):
+    curve_id: str
+    color: str | None = None
+    alpha: float | None = None
+    linestyle: str | None = None
+    linewidth: float | None = None
+    line_kwargs: Mapping[str, Any] | None = field(default=None)
+    interpolate_color: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        if self.linewidth is not None and self.linewidth < 0:
+            raise ValueError("linewidth must be non-negative.")
+        if self.line_kwargs is not None:
+            object.__setattr__(self, "line_kwargs", dict(self.line_kwargs))
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        curve = scene.get_curve(self.curve_id)
+        t = _clamp_progress(progress)
+
+        color = curve.color
+        if self.color is not None:
+            color = (
+                _interpolate_color(_current_curve_color(curve), self.color, t)
+                if self.interpolate_color
+                else curve.color
+            )
+
+        alpha = curve.alpha
+        if self.alpha is not None:
+            alpha = _interpolate_float(_current_curve_alpha(curve), self.alpha, t)
+
+        linewidth = curve.linewidth
+        if self.linewidth is not None:
+            linewidth = _interpolate_float(_current_curve_linewidth(curve), self.linewidth, t)
+
+        updated_curve = curve.copy_with(
+            color=color,
+            alpha=alpha,
+            linewidth=linewidth,
+        )
+        return scene.update_curve(updated_curve)
+
+    def apply(self, scene: Scene) -> Scene:
+        curve = scene.get_curve(self.curve_id)
+        updated_curve = curve.copy_with(
+            color=self.color,
+            alpha=self.alpha,
+            linestyle=self.linestyle,
+            linewidth=self.linewidth,
+            line_kwargs=curve.line_kwargs if self.line_kwargs is None else self.line_kwargs,
+        )
+        return scene.update_curve(updated_curve)
+
+
+@dataclass(frozen=True)
+class FillStyleTransition(Transition):
+    fill_id: str
+    color: str | None = None
+    alpha: float | None = None
+    linestyle: str | None = None
+    linewidth: float | None = None
+    fill_kwargs: Mapping[str, Any] | None = field(default=None)
+    interpolate_color: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        if self.linewidth is not None and self.linewidth < 0:
+            raise ValueError("linewidth must be non-negative.")
+        if self.fill_kwargs is not None:
+            object.__setattr__(self, "fill_kwargs", dict(self.fill_kwargs))
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        fill = scene.get_fill(self.fill_id)
+        t = _clamp_progress(progress)
+
+        color = fill.color
+        if self.color is not None:
+            color = (
+                _interpolate_color(_current_fill_color(fill), self.color, t)
+                if self.interpolate_color
+                else fill.color
+            )
+
+        alpha = fill.alpha
+        if self.alpha is not None:
+            alpha = _interpolate_float(_current_fill_alpha(fill), self.alpha, t)
+
+        linewidth = fill.linewidth
+        if self.linewidth is not None:
+            linewidth = _interpolate_float(_current_fill_linewidth(fill), self.linewidth, t)
+
+        updated_fill = fill.copy_with(
+            color=color,
+            alpha=alpha,
+            linewidth=linewidth,
+        )
+        return scene.update_fill(updated_fill)
+
+    def apply(self, scene: Scene) -> Scene:
+        fill = scene.get_fill(self.fill_id)
+        updated_fill = fill.copy_with(
+            color=self.color,
+            alpha=self.alpha,
+            linestyle=self.linestyle,
+            linewidth=self.linewidth,
+            fill_kwargs=fill.fill_kwargs if self.fill_kwargs is None else self.fill_kwargs,
+        )
+        return scene.update_fill(updated_fill)
+
+
+@dataclass(frozen=True)
 class StressTransition(Transition):
     curve_id: str
     color: str | None = None
@@ -326,7 +521,7 @@ class StressTransition(Transition):
 
         return FrameState(
             scene=scene,
-            glow=GlowOverlay(x=curve.x, y=curve.y, artist_kwargs=glow_style),
+            glows=(GlowOverlay(x=curve.x, y=curve.y, artist_kwargs=glow_style),),
         )
 
 

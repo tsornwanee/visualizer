@@ -21,8 +21,8 @@ class ScheduledTransition:
     duration: float
 
     def __post_init__(self) -> None:
-        if self.duration <= 0:
-            raise ValueError("Transition duration must be positive.")
+        if self.duration < 0:
+            raise ValueError("Transition duration must be non-negative.")
 
 
 @dataclass(frozen=True)
@@ -104,12 +104,8 @@ class Schedule:
             lines[curve_id] = line
 
         fills: dict[str, PolyCollection | None] = {fill_id: None for fill_id in fill_templates}
-
-        (pointer_artist,) = ax.plot([], [], linestyle="None", marker="o")
-        pointer_artist.set_visible(False)
-
-        (glow_artist,) = ax.plot([], [], solid_capstyle="round")
-        glow_artist.set_visible(False)
+        pointer_artists: list[Line2D] = []
+        glow_artists: list[Line2D] = []
 
         def render_frame(frame_state: FrameState) -> list[Artist]:
             artists: list[Artist] = []
@@ -145,32 +141,36 @@ class Schedule:
                         )
                         artists.append(fills[fill_id])
 
-            if frame_state.pointer is not None:
-                pointer_artist.set_data([frame_state.pointer.x], [frame_state.pointer.y])
-                pointer_artist.set(marker="o", linestyle="None")
-                pointer_artist.set(**frame_state.pointer.artist_kwargs)
-                pointer_artist.set_visible(True)
-            else:
-                pointer_artist.set_data([], [])
-                pointer_artist.set_visible(False)
-            artists.append(pointer_artist)
+            while pointer_artists:
+                pointer_artists.pop().remove()
+            for pointer in frame_state.pointers:
+                (artist,) = ax.plot(
+                    [pointer.x],
+                    [pointer.y],
+                    marker="o",
+                    linestyle="None",
+                    **pointer.artist_kwargs,
+                )
+                pointer_artists.append(artist)
+                artists.append(artist)
 
-            if frame_state.glow is not None:
-                glow_artist.set_data(frame_state.glow.x, frame_state.glow.y)
-                glow_artist.set(**frame_state.glow.artist_kwargs)
-                glow_artist.set_visible(True)
-            else:
-                glow_artist.set_data([], [])
-                glow_artist.set_visible(False)
-            artists.append(glow_artist)
+            while glow_artists:
+                glow_artists.pop().remove()
+            for glow in frame_state.glows:
+                (artist,) = ax.plot(glow.x, glow.y, **glow.artist_kwargs)
+                glow_artists.append(artist)
+                artists.append(artist)
 
             return artists
 
         def init() -> list[Artist]:
-            return render_frame(FrameState(scene=self.initial_scene))
+            return render_frame(self._frame_state_from_prepared(prepared, 0.0))
 
-        frame_count = max(int(np.ceil(self.total_duration * fps)), 1) + 1
-        frame_times = np.linspace(0.0, self.total_duration, frame_count)
+        if self.total_duration == 0:
+            frame_times = np.array([0.0])
+        else:
+            frame_count = max(int(np.ceil(self.total_duration * fps)), 1) + 1
+            frame_times = np.linspace(0.0, self.total_duration, frame_count)
 
         def update(elapsed_seconds: float) -> list[Artist]:
             frame_state = self._frame_state_from_prepared(prepared, float(elapsed_seconds))
@@ -212,19 +212,31 @@ class Schedule:
         prepared: list[_PreparedTransition],
         elapsed_seconds: float,
     ) -> FrameState:
-        if elapsed_seconds <= 0:
-            return FrameState(scene=self.initial_scene)
         if not prepared:
             return FrameState(scene=self.initial_scene)
 
+        elapsed = max(float(elapsed_seconds), 0.0)
+        current_scene = self.initial_scene
+
         for item in prepared:
-            if elapsed_seconds <= item.start_time:
-                return FrameState(scene=item.start_scene)
-            if elapsed_seconds < item.end_time:
-                progress = (elapsed_seconds - item.start_time) / item.scheduled.duration
+            duration = item.scheduled.duration
+
+            if duration == 0:
+                if elapsed < item.start_time:
+                    return FrameState(scene=current_scene)
+                current_scene = item.end_scene
+                continue
+
+            if elapsed <= item.start_time:
+                return FrameState(scene=current_scene)
+
+            if elapsed < item.end_time:
+                progress = (elapsed - item.start_time) / duration
                 return item.scheduled.transition.frame_state(item.start_scene, progress)
 
-        return FrameState(scene=prepared[-1].end_scene)
+            current_scene = item.end_scene
+
+        return FrameState(scene=current_scene)
 
     def _collect_curve_templates(
         self,
