@@ -492,6 +492,9 @@ class FillStyleTransition(Transition):
 @dataclass(frozen=True)
 class StressTransition(Transition):
     curve_id: str
+    glow_color: str | None = None
+    glow_width: float | None = None
+    # Backward-compatible aliases for earlier drafts of the API.
     color: str | None = None
     max_alpha: float = 0.35
     glow_linewidth: float | None = None
@@ -499,6 +502,22 @@ class StressTransition(Transition):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_alpha", _validate_alpha(self.max_alpha))
+        if self.glow_width is not None and self.glow_width < 0:
+            raise ValueError("glow_width must be non-negative.")
+        if self.glow_linewidth is not None and self.glow_linewidth < 0:
+            raise ValueError("glow_linewidth must be non-negative.")
+        if (
+            self.glow_color is not None
+            and self.color is not None
+            and self.glow_color != self.color
+        ):
+            raise ValueError("glow_color and color cannot disagree.")
+        if (
+            self.glow_width is not None
+            and self.glow_linewidth is not None
+            and self.glow_width != self.glow_linewidth
+        ):
+            raise ValueError("glow_width and glow_linewidth cannot disagree.")
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         return scene
@@ -517,12 +536,14 @@ class StressTransition(Transition):
 
         curve_style = curve.mpl_line_kwargs()
         base_linewidth = float(curve_style.get("linewidth", 2.0))
+        glow_color = self.glow_color if self.glow_color is not None else self.color
+        glow_width = self.glow_width if self.glow_width is not None else self.glow_linewidth
         glow_style = {
-            "color": self.color or curve_style.get("color", "#f59e0b"),
+            "color": glow_color or curve_style.get("color", "#f59e0b"),
             "alpha": self.max_alpha * strength,
             "linewidth": (
-                self.glow_linewidth
-                if self.glow_linewidth is not None
+                glow_width
+                if glow_width is not None
                 else max(base_linewidth * 3.0, base_linewidth + 2.0)
             ),
             "linestyle": self.linestyle or curve_style.get("linestyle", "-"),
