@@ -144,12 +144,15 @@ class Schedule:
             while pointer_artists:
                 pointer_artists.pop().remove()
             for pointer in frame_state.pointers:
+                pointer_kwargs = {
+                    "marker": "o",
+                    "linestyle": "None",
+                }
+                pointer_kwargs.update(pointer.artist_kwargs)
                 (artist,) = ax.plot(
                     [pointer.x],
                     [pointer.y],
-                    marker="o",
-                    linestyle="None",
-                    **pointer.artist_kwargs,
+                    **pointer_kwargs,
                 )
                 pointer_artists.append(artist)
                 artists.append(artist)
