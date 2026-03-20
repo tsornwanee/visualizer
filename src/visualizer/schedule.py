@@ -12,7 +12,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from .scene import Curve, FillBetweenArea, Scene
-from .transitions import FrameState, Transition
+from .transitions import FrameState, PauseTransition, Transition
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,13 @@ class Schedule:
     def add(self, transition: Transition, duration: float) -> Schedule:
         self.entries.append(ScheduledTransition(transition=transition, duration=duration))
         return self
+
+    def add_break(self, duration: float) -> Schedule:
+        self.entries.append(ScheduledTransition(transition=PauseTransition(), duration=duration))
+        return self
+
+    def pause(self, duration: float) -> Schedule:
+        return self.add_break(duration)
 
     @property
     def total_duration(self) -> float:

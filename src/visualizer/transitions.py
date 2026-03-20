@@ -120,6 +120,17 @@ class Transition(ABC):
 
 
 @dataclass(frozen=True)
+class PauseTransition(Transition):
+    """A timed no-op transition that keeps the current scene unchanged."""
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        return scene
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene
+
+
+@dataclass(frozen=True)
 class ParallelTransition(Transition):
     transitions: tuple[Transition, ...]
 
