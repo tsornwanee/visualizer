@@ -1,3 +1,5 @@
+__version__ = "0.1.0"
+
 from .scene import Curve, FillBetweenArea, Scene
 from .schedule import Schedule
 from .transitions import (
@@ -6,6 +8,7 @@ from .transitions import (
     EraseTransition,
     FillBetweenTransition,
     FillStyleTransition,
+    JitterFillBetweenTransition,
     JitterTransition,
     MoveFillBetweenTransition,
     MoveTransition,
@@ -23,6 +26,7 @@ __all__ = [
     "FillBetweenArea",
     "FillBetweenTransition",
     "FillStyleTransition",
+    "JitterFillBetweenTransition",
     "JitterTransition",
     "MoveFillBetweenTransition",
     "MoveTransition",
@@ -32,4 +36,5 @@ __all__ = [
     "Schedule",
     "StressTransition",
     "Transition",
+    "__version__",
 ]

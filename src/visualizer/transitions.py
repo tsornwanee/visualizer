@@ -605,3 +605,61 @@ class JitterTransition(Transition):
             y=np.clip(curve.y + y_offset, 0.0, 1.0),
         )
         return scene.update_curve(perturbed_curve)
+
+
+@dataclass(frozen=True)
+class JitterFillBetweenTransition(Transition):
+    fill_id: str
+    x_amplitude: float = 0.0
+    y1_amplitude: float = 0.02
+    y2_amplitude: float = 0.0
+    cycles: float = 10.0
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.x_amplitude < 0.0 or self.y1_amplitude < 0.0 or self.y2_amplitude < 0.0:
+            raise ValueError("Jitter amplitudes must be non-negative.")
+        if self.cycles <= 0.0:
+            raise ValueError("cycles must be positive.")
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        return self._perturbed_scene(scene, progress)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene
+
+    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+        return FrameState(scene=self._perturbed_scene(scene, progress))
+
+    def _perturbed_scene(self, scene: Scene, progress: float) -> Scene:
+        fill = scene.get_fill(self.fill_id)
+        if fill.is_empty:
+            return scene
+
+        envelope = float(np.sin(np.pi * _clamp_progress(progress)))
+        if envelope <= 0.0 or (
+            self.x_amplitude == 0.0 and self.y1_amplitude == 0.0 and self.y2_amplitude == 0.0
+        ):
+            return scene
+
+        oscillation = 2.0 * np.pi * self.cycles * _clamp_progress(progress)
+        spatial = np.linspace(0.0, 2.0 * np.pi, fill.x.size)
+        rng = np.random.default_rng(self.seed)
+        phase_x = float(rng.uniform(0.0, 2.0 * np.pi))
+        phase_y1 = float(rng.uniform(0.0, 2.0 * np.pi))
+        phase_y2 = float(rng.uniform(0.0, 2.0 * np.pi))
+
+        x_offset = envelope * self.x_amplitude * np.sin(oscillation + 2.0 * spatial + phase_x)
+        y1_offset = envelope * self.y1_amplitude * np.sin(
+            1.3 * oscillation + 3.0 * spatial + phase_y1
+        )
+        y2_offset = envelope * self.y2_amplitude * np.sin(
+            0.9 * oscillation + 2.5 * spatial + phase_y2
+        )
+
+        perturbed_fill = fill.copy_with(
+            x=np.clip(fill.x + x_offset, 0.0, 1.0),
+            y1=np.clip(fill.y1 + y1_offset, 0.0, 1.0),
+            y2=np.clip(fill.y2 + y2_offset, 0.0, 1.0),
+        )
+        return scene.update_fill(perturbed_fill)
