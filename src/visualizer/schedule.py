@@ -5,12 +5,14 @@ from dataclasses import dataclass, field
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
+from matplotlib.artist import Artist
 from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
-from .scene import Curve, Scene
-from .transitions import Transition
+from .scene import Curve, FillBetweenArea, Scene
+from .transitions import FrameState, Transition
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,7 @@ class Schedule:
 
     def scene_at(self, elapsed_seconds: float) -> Scene:
         prepared = self._prepare()
-        return self._scene_at_from_prepared(prepared, elapsed_seconds)
+        return self._frame_state_from_prepared(prepared, elapsed_seconds).scene
 
     def build_animation(
         self,
@@ -77,6 +79,7 @@ class Schedule:
         prepared = self._prepare()
         final_scene = prepared[-1].end_scene if prepared else self.initial_scene
         curve_templates = self._collect_curve_templates(prepared, final_scene)
+        fill_templates = self._collect_fill_templates(prepared, final_scene)
 
         if ax is None and fig is None:
             fig, ax = plt.subplots()
@@ -95,37 +98,83 @@ class Schedule:
 
         lines: dict[str, Line2D] = {}
         for curve_id, curve in curve_templates.items():
-            (line,) = ax.plot([], [], **curve.line_kwargs)
+            (line,) = ax.plot([], [], **curve.mpl_line_kwargs())
             line.set_label(curve_id)
             line.set_visible(False)
             lines[curve_id] = line
 
-        def render_scene(scene: Scene) -> list[Line2D]:
+        fills: dict[str, PolyCollection | None] = {fill_id: None for fill_id in fill_templates}
+
+        (pointer_artist,) = ax.plot([], [], linestyle="None", marker="o")
+        pointer_artist.set_visible(False)
+
+        (glow_artist,) = ax.plot([], [], solid_capstyle="round")
+        glow_artist.set_visible(False)
+
+        def render_frame(frame_state: FrameState) -> list[Artist]:
+            artists: list[Artist] = []
+
             for curve_id, line in lines.items():
-                if scene.contains(curve_id):
-                    curve = scene.get_curve(curve_id)
+                if frame_state.scene.contains_curve(curve_id):
+                    curve = frame_state.scene.get_curve(curve_id)
                     if curve.is_empty:
                         line.set_data([], [])
                         line.set_visible(False)
                     else:
                         line.set_data(curve.x, curve.y)
-                        if curve.line_kwargs:
-                            line.set(**curve.line_kwargs)
+                        line.set(**curve.mpl_line_kwargs())
                         line.set_visible(True)
                 else:
                     line.set_data([], [])
                     line.set_visible(False)
+                artists.append(line)
 
-            return list(lines.values())
+            for fill_id, collection in fills.items():
+                if collection is not None:
+                    collection.remove()
+                    fills[fill_id] = None
 
-        def init() -> list[Line2D]:
-            return render_scene(self.initial_scene)
+                if frame_state.scene.contains_fill(fill_id):
+                    fill = frame_state.scene.get_fill(fill_id)
+                    if not fill.is_empty:
+                        fills[fill_id] = ax.fill_between(
+                            fill.x,
+                            fill.y1,
+                            fill.y2,
+                            **fill.mpl_fill_kwargs(),
+                        )
+                        artists.append(fills[fill_id])
+
+            if frame_state.pointer is not None:
+                pointer_artist.set_data([frame_state.pointer.x], [frame_state.pointer.y])
+                pointer_artist.set(marker="o", linestyle="None")
+                pointer_artist.set(**frame_state.pointer.artist_kwargs)
+                pointer_artist.set_visible(True)
+            else:
+                pointer_artist.set_data([], [])
+                pointer_artist.set_visible(False)
+            artists.append(pointer_artist)
+
+            if frame_state.glow is not None:
+                glow_artist.set_data(frame_state.glow.x, frame_state.glow.y)
+                glow_artist.set(**frame_state.glow.artist_kwargs)
+                glow_artist.set_visible(True)
+            else:
+                glow_artist.set_data([], [])
+                glow_artist.set_visible(False)
+            artists.append(glow_artist)
+
+            return artists
+
+        def init() -> list[Artist]:
+            return render_frame(FrameState(scene=self.initial_scene))
 
         frame_count = max(int(np.ceil(self.total_duration * fps)), 1) + 1
         frame_times = np.linspace(0.0, self.total_duration, frame_count)
 
-        def update(elapsed_seconds: float) -> list[Line2D]:
-            return render_scene(self._scene_at_from_prepared(prepared, float(elapsed_seconds)))
+        def update(elapsed_seconds: float) -> list[Artist]:
+            frame_state = self._frame_state_from_prepared(prepared, float(elapsed_seconds))
+            return render_frame(frame_state)
 
         return FuncAnimation(
             fig=fig,
@@ -158,24 +207,24 @@ class Schedule:
 
         return prepared
 
-    def _scene_at_from_prepared(
+    def _frame_state_from_prepared(
         self,
         prepared: list[_PreparedTransition],
         elapsed_seconds: float,
-    ) -> Scene:
+    ) -> FrameState:
         if elapsed_seconds <= 0:
-            return self.initial_scene
+            return FrameState(scene=self.initial_scene)
         if not prepared:
-            return self.initial_scene
+            return FrameState(scene=self.initial_scene)
 
         for item in prepared:
             if elapsed_seconds <= item.start_time:
-                return item.start_scene
+                return FrameState(scene=item.start_scene)
             if elapsed_seconds < item.end_time:
                 progress = (elapsed_seconds - item.start_time) / item.scheduled.duration
-                return item.scheduled.transition.interpolate(item.start_scene, progress)
+                return item.scheduled.transition.frame_state(item.start_scene, progress)
 
-        return prepared[-1].end_scene
+        return FrameState(scene=prepared[-1].end_scene)
 
     def _collect_curve_templates(
         self,
@@ -189,4 +238,18 @@ class Schedule:
             templates.update(item.end_scene.curves)
 
         templates.update(final_scene.curves)
+        return templates
+
+    def _collect_fill_templates(
+        self,
+        prepared: list[_PreparedTransition],
+        final_scene: Scene,
+    ) -> dict[str, FillBetweenArea]:
+        templates: dict[str, FillBetweenArea] = dict(self.initial_scene.fills)
+
+        for item in prepared:
+            templates.update(item.start_scene.fills)
+            templates.update(item.end_scene.fills)
+
+        templates.update(final_scene.fills)
         return templates
