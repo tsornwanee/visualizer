@@ -19,6 +19,8 @@ from .scene import (
     _validate_alpha,
 )
 
+Bounds = tuple[float, float]
+
 
 def _interpolate_float(start: float, end: float, progress: float) -> float:
     t = _clamp_progress(progress)
@@ -87,6 +89,17 @@ def _normalize_timeline_domain(
         start, end = end, start
 
     return (start, end)
+
+
+def _interpolate_bounds(
+    start_bounds: Bounds,
+    end_bounds: Bounds,
+    progress: float,
+) -> Bounds:
+    return (
+        _interpolate_float(start_bounds[0], end_bounds[0], progress),
+        _interpolate_float(start_bounds[1], end_bounds[1], progress),
+    )
 
 
 @dataclass(frozen=True)
@@ -518,47 +531,74 @@ class EraseFillBetweenTransition(Transition):
 @dataclass(frozen=True)
 class MoveTransition(Transition):
     curve_id: str
-    x_prime: npt.ArrayLike
+    x_prime: npt.ArrayLike | None
     y_prime: npt.ArrayLike
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
     line_kwargs: Mapping[str, Any] | None = field(default=None)
 
     def __post_init__(self) -> None:
-        x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
         y_prime = _coerce_coordinate_array(self.y_prime, "y_prime")
+        x_prime = None
+        if self.x_prime is not None:
+            x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
 
-        if x_prime.shape != y_prime.shape:
+        if x_prime is not None and x_prime.shape != y_prime.shape:
             raise ValueError("x_prime and y_prime must have the same shape.")
 
         object.__setattr__(self, "x_prime", x_prime)
         object.__setattr__(self, "y_prime", y_prime)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
+        object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
         if self.line_kwargs is not None:
             object.__setattr__(self, "line_kwargs", dict(self.line_kwargs))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         source_curve = scene.get_curve(self.curve_id)
-        self._validate_source_shape(source_curve)
+        x_prime = self._effective_x_prime(source_curve)
+        self._validate_source_shape(source_curve, x_prime)
 
         t = _clamp_progress(progress)
-        x_values = source_curve.x + (self.x_prime - source_curve.x) * t
+        x_values = source_curve.x + (x_prime - source_curve.x) * t
         y_values = source_curve.y + (self.y_prime - source_curve.y) * t
 
-        return scene.update_curve(self._updated_curve(source_curve, x_values, y_values))
+        return scene.update_curve(
+            self._updated_curve(
+                source_curve,
+                x_values,
+                y_values,
+                domain=self._interpolated_domain(source_curve, t),
+                value_range=self._interpolated_value_range(source_curve, t),
+            )
+        )
 
     def apply(self, scene: Scene) -> Scene:
         source_curve = scene.get_curve(self.curve_id)
-        self._validate_source_shape(source_curve)
-        return scene.update_curve(self._updated_curve(source_curve, self.x_prime, self.y_prime))
+        x_prime = self._effective_x_prime(source_curve)
+        self._validate_source_shape(source_curve, x_prime)
+        return scene.update_curve(
+            self._updated_curve(
+                source_curve,
+                x_prime,
+                self.y_prime,
+                domain=self.domain,
+                value_range=self.value_range,
+            )
+        )
 
     def _updated_curve(
         self,
         source_curve: Curve,
         x_values: npt.ArrayLike,
         y_values: npt.ArrayLike,
+        *,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
     ) -> Curve:
         return source_curve.copy_with(
             x=x_values,
@@ -567,11 +607,42 @@ class MoveTransition(Transition):
             alpha=self.alpha,
             linestyle=self.linestyle,
             linewidth=self.linewidth,
+            domain=domain,
+            value_range=value_range,
             line_kwargs=source_curve.line_kwargs if self.line_kwargs is None else self.line_kwargs,
         )
 
-    def _validate_source_shape(self, source_curve: Curve) -> None:
-        if source_curve.x.shape != self.x_prime.shape:
+    def _effective_x_prime(self, source_curve: Curve) -> FloatArray:
+        if self.x_prime is None:
+            return source_curve.x
+        return self.x_prime
+
+    def _interpolated_domain(self, source_curve: Curve, progress: float) -> Bounds | None:
+        if self.domain is None:
+            return source_curve.domain
+
+        start_bounds = source_curve.domain or self._curve_x_extent(source_curve)
+        return _interpolate_bounds(start_bounds, self.domain, progress)
+
+    def _interpolated_value_range(self, source_curve: Curve, progress: float) -> Bounds | None:
+        if self.value_range is None:
+            return source_curve.value_range
+
+        start_bounds = source_curve.value_range or self._curve_y_extent(source_curve)
+        return _interpolate_bounds(start_bounds, self.value_range, progress)
+
+    def _curve_x_extent(self, curve: Curve) -> Bounds:
+        return (float(np.min(curve.x)), float(np.max(curve.x)))
+
+    def _curve_y_extent(self, curve: Curve) -> Bounds:
+        return (float(np.min(curve.y)), float(np.max(curve.y)))
+
+    def _validate_source_shape(
+        self,
+        source_curve: Curve,
+        x_prime: FloatArray,
+    ) -> None:
+        if source_curve.x.shape != x_prime.shape or source_curve.x.shape != self.y_prime.shape:
             raise ValueError(
                 "MoveTransition requires x_prime and y_prime to match the source curve shape."
             )
@@ -580,47 +651,71 @@ class MoveTransition(Transition):
 @dataclass(frozen=True)
 class MoveFillBetweenTransition(Transition):
     fill_id: str
-    x_prime: npt.ArrayLike
+    x_prime: npt.ArrayLike | None
     y1_prime: npt.ArrayLike
     y2_prime: npt.ArrayLike | float
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
     fill_kwargs: Mapping[str, Any] | None = field(default=None)
 
     def __post_init__(self) -> None:
-        x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
         y1_prime = _coerce_coordinate_array(self.y1_prime, "y1_prime")
+        x_prime = None
+        if self.x_prime is not None:
+            x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
 
-        if x_prime.shape != y1_prime.shape:
+        if x_prime is not None and x_prime.shape != y1_prime.shape:
             raise ValueError("x_prime and y1_prime must have the same shape.")
 
-        y2_prime = _coerce_matching_coordinate_array(self.y2_prime, "y2_prime", x_prime.shape)
+        y2_prime = _coerce_matching_coordinate_array(self.y2_prime, "y2_prime", y1_prime.shape)
 
         object.__setattr__(self, "x_prime", x_prime)
         object.__setattr__(self, "y1_prime", y1_prime)
         object.__setattr__(self, "y2_prime", y2_prime)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
+        object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
         if self.fill_kwargs is not None:
             object.__setattr__(self, "fill_kwargs", dict(self.fill_kwargs))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         source_fill = scene.get_fill(self.fill_id)
-        self._validate_source_shape(source_fill)
+        x_prime = self._effective_x_prime(source_fill)
+        self._validate_source_shape(source_fill, x_prime)
 
         t = _clamp_progress(progress)
-        x_values = source_fill.x + (self.x_prime - source_fill.x) * t
+        x_values = source_fill.x + (x_prime - source_fill.x) * t
         y1_values = source_fill.y1 + (self.y1_prime - source_fill.y1) * t
         y2_values = source_fill.y2 + (self.y2_prime - source_fill.y2) * t
 
-        return scene.update_fill(self._updated_fill(source_fill, x_values, y1_values, y2_values))
+        return scene.update_fill(
+            self._updated_fill(
+                source_fill,
+                x_values,
+                y1_values,
+                y2_values,
+                domain=self._interpolated_domain(source_fill, t),
+                value_range=self._interpolated_value_range(source_fill, t),
+            )
+        )
 
     def apply(self, scene: Scene) -> Scene:
         source_fill = scene.get_fill(self.fill_id)
-        self._validate_source_shape(source_fill)
+        x_prime = self._effective_x_prime(source_fill)
+        self._validate_source_shape(source_fill, x_prime)
         return scene.update_fill(
-            self._updated_fill(source_fill, self.x_prime, self.y1_prime, self.y2_prime)
+            self._updated_fill(
+                source_fill,
+                x_prime,
+                self.y1_prime,
+                self.y2_prime,
+                domain=self.domain,
+                value_range=self.value_range,
+            )
         )
 
     def _updated_fill(
@@ -629,6 +724,9 @@ class MoveFillBetweenTransition(Transition):
         x_values: npt.ArrayLike,
         y1_values: npt.ArrayLike,
         y2_values: npt.ArrayLike,
+        *,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
     ) -> FillBetweenArea:
         return source_fill.copy_with(
             x=x_values,
@@ -638,11 +736,57 @@ class MoveFillBetweenTransition(Transition):
             alpha=self.alpha,
             linestyle=self.linestyle,
             linewidth=self.linewidth,
+            domain=domain,
+            value_range=value_range,
             fill_kwargs=source_fill.fill_kwargs if self.fill_kwargs is None else self.fill_kwargs,
         )
 
-    def _validate_source_shape(self, source_fill: FillBetweenArea) -> None:
-        if source_fill.x.shape != self.x_prime.shape:
+    def _effective_x_prime(self, source_fill: FillBetweenArea) -> FloatArray:
+        if self.x_prime is None:
+            return source_fill.x
+        return self.x_prime
+
+    def _interpolated_domain(
+        self,
+        source_fill: FillBetweenArea,
+        progress: float,
+    ) -> Bounds | None:
+        if self.domain is None:
+            return source_fill.domain
+
+        start_bounds = source_fill.domain or self._fill_x_extent(source_fill)
+        return _interpolate_bounds(start_bounds, self.domain, progress)
+
+    def _interpolated_value_range(
+        self,
+        source_fill: FillBetweenArea,
+        progress: float,
+    ) -> Bounds | None:
+        if self.value_range is None:
+            return source_fill.value_range
+
+        start_bounds = source_fill.value_range or self._fill_y_extent(source_fill)
+        return _interpolate_bounds(start_bounds, self.value_range, progress)
+
+    def _fill_x_extent(self, fill: FillBetweenArea) -> Bounds:
+        return (float(np.min(fill.x)), float(np.max(fill.x)))
+
+    def _fill_y_extent(self, fill: FillBetweenArea) -> Bounds:
+        return (
+            float(min(np.min(fill.y1), np.min(fill.y2))),
+            float(max(np.max(fill.y1), np.max(fill.y2))),
+        )
+
+    def _validate_source_shape(
+        self,
+        source_fill: FillBetweenArea,
+        x_prime: FloatArray,
+    ) -> None:
+        if (
+            source_fill.x.shape != x_prime.shape
+            or source_fill.x.shape != self.y1_prime.shape
+            or source_fill.x.shape != self.y2_prime.shape
+        ):
             raise ValueError(
                 "MoveFillBetweenTransition requires target arrays to match the source fill shape."
             )
