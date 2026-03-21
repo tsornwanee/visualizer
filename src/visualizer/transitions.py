@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 import numpy as np
@@ -135,22 +136,156 @@ def _jitter_phase_pair(seed: int) -> tuple[float, float]:
     )
 
 
+def _coerce_component_values(
+    values: float | Sequence[float] | npt.NDArray[np.float64],
+    *,
+    name: str,
+) -> list[float]:
+    if isinstance(values, np.ndarray):
+        if values.ndim == 0:
+            result = [float(values)]
+        elif values.ndim == 1:
+            result = [float(value) for value in values.tolist()]
+        else:
+            raise ValueError(f"{name} must be a scalar or one-dimensional sequence.")
+    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        result = [float(value) for value in values]
+    else:
+        result = [float(values)]
+
+    if not result:
+        raise ValueError(f"{name} must not be empty.")
+    if not all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values.")
+
+    return result
+
+
+def _coerce_seed_values(
+    seeds: int | Sequence[int] | npt.NDArray[np.int64],
+    *,
+    components: int,
+    name: str,
+) -> list[int]:
+    if isinstance(seeds, np.ndarray):
+        if seeds.ndim == 0:
+            base_seed = int(seeds)
+            return [base_seed + index for index in range(components)]
+        if seeds.ndim != 1:
+            raise ValueError(f"{name} must be a scalar or one-dimensional sequence.")
+        values = [int(value) for value in seeds.tolist()]
+    elif isinstance(seeds, Sequence) and not isinstance(seeds, (str, bytes)):
+        values = [int(value) for value in seeds]
+    else:
+        base_seed = int(seeds)
+        return [base_seed + index for index in range(components)]
+
+    if not values:
+        raise ValueError(f"{name} must not be empty.")
+    if len(values) == 1 and components > 1:
+        base_seed = values[0]
+        return [base_seed + index for index in range(components)]
+    if len(values) != components:
+        raise ValueError(f"{name} must have length 1 or {components}.")
+    return values
+
+
+def _normalize_jitter_components(
+    amplitudes: float | Sequence[float] | npt.NDArray[np.float64],
+    cycles: float | Sequence[float] | npt.NDArray[np.float64],
+    seeds: int | Sequence[int] | npt.NDArray[np.int64],
+    *,
+    amplitude_name: str,
+    cycles_name: str,
+    seed_name: str,
+) -> tuple[list[float], list[float], list[int]]:
+    amplitude_values = _coerce_component_values(amplitudes, name=amplitude_name)
+    cycle_values = _coerce_component_values(cycles, name=cycles_name)
+
+    component_count = max(len(amplitude_values), len(cycle_values))
+    if len(amplitude_values) == 1 and component_count > 1:
+        amplitude_values = amplitude_values * component_count
+    if len(cycle_values) == 1 and component_count > 1:
+        cycle_values = cycle_values * component_count
+
+    if len(amplitude_values) != component_count:
+        raise ValueError(f"{amplitude_name} must have length 1 or {component_count}.")
+    if len(cycle_values) != component_count:
+        raise ValueError(f"{cycles_name} must have length 1 or {component_count}.")
+
+    if any(amplitude < 0.0 for amplitude in amplitude_values):
+        raise ValueError(f"{amplitude_name} must be non-negative.")
+    if any(cycle <= 0.0 for cycle in cycle_values):
+        raise ValueError(f"{cycles_name} must be positive.")
+
+    seed_values = _coerce_seed_values(seeds, components=component_count, name=seed_name)
+    return amplitude_values, cycle_values, seed_values
+
+
+def _combine_jitter_components(
+    size: int,
+    *,
+    progress: float,
+    envelope: float,
+    amplitudes: float | Sequence[float] | npt.NDArray[np.float64],
+    cycles: float | Sequence[float] | npt.NDArray[np.float64],
+    seeds: int | Sequence[int] | npt.NDArray[np.int64],
+    oscillation_scale: float,
+    spatial_scale: float,
+    axis: str,
+    amplitude_name: str,
+    cycles_name: str,
+    seed_name: str,
+) -> FloatArray:
+    amplitude_values, cycle_values, seed_values = _normalize_jitter_components(
+        amplitudes,
+        cycles,
+        seeds,
+        amplitude_name=amplitude_name,
+        cycles_name=cycles_name,
+        seed_name=seed_name,
+    )
+
+    offset = np.zeros(size, dtype=float)
+    spatial = np.linspace(0.0, 2.0 * np.pi, size)
+
+    for amplitude, cycle, seed in zip(amplitude_values, cycle_values, seed_values):
+        if amplitude == 0.0:
+            continue
+
+        oscillation = 2.0 * np.pi * cycle * progress
+        phase_x, phase_y = _jitter_phase_pair(seed)
+        phase = phase_x if axis == "x" else phase_y
+        offset += envelope * amplitude * np.sin(
+            oscillation_scale * oscillation + spatial_scale * spatial + phase
+        )
+
+    return offset
+
+
 def _jitter_x_offset(
     size: int,
     *,
     progress: float,
     envelope: float,
-    amplitude: float,
-    cycles: float,
-    seed: int,
+    amplitude: float | Sequence[float] | npt.NDArray[np.float64],
+    cycles: float | Sequence[float] | npt.NDArray[np.float64],
+    seed: int | Sequence[int] | npt.NDArray[np.int64],
 ) -> FloatArray:
-    if amplitude == 0.0:
-        return np.zeros(size, dtype=float)
-
-    oscillation = 2.0 * np.pi * cycles * progress
-    spatial = np.linspace(0.0, 2.0 * np.pi, size)
-    phase_x, _ = _jitter_phase_pair(seed)
-    return envelope * amplitude * np.sin(oscillation + 2.0 * spatial + phase_x)
+    return _combine_jitter_components(
+        size,
+        progress=progress,
+        envelope=envelope,
+        amplitudes=amplitude,
+        cycles=cycles,
+        seeds=seed,
+        oscillation_scale=1.0,
+        spatial_scale=2.0,
+        axis="x",
+        amplitude_name="x_amplitude",
+        cycles_name="cycles",
+        seed_name="seed",
+    )
 
 
 def _jitter_y_offset(
@@ -158,20 +293,25 @@ def _jitter_y_offset(
     *,
     progress: float,
     envelope: float,
-    amplitude: float,
-    cycles: float,
-    seed: int,
+    amplitude: float | Sequence[float] | npt.NDArray[np.float64],
+    cycles: float | Sequence[float] | npt.NDArray[np.float64],
+    seed: int | Sequence[int] | npt.NDArray[np.int64],
     oscillation_scale: float,
     spatial_scale: float,
 ) -> FloatArray:
-    if amplitude == 0.0:
-        return np.zeros(size, dtype=float)
-
-    oscillation = 2.0 * np.pi * cycles * progress
-    spatial = np.linspace(0.0, 2.0 * np.pi, size)
-    _, phase_y = _jitter_phase_pair(seed)
-    return envelope * amplitude * np.sin(
-        oscillation_scale * oscillation + spatial_scale * spatial + phase_y
+    return _combine_jitter_components(
+        size,
+        progress=progress,
+        envelope=envelope,
+        amplitudes=amplitude,
+        cycles=cycles,
+        seeds=seed,
+        oscillation_scale=oscillation_scale,
+        spatial_scale=spatial_scale,
+        axis="y",
+        amplitude_name="y_amplitude",
+        cycles_name="cycles",
+        seed_name="seed",
     )
 
 
@@ -1269,16 +1409,28 @@ class StressTransition(Transition):
 @dataclass(frozen=True)
 class JitterTransition(Transition):
     curve_id: str
-    x_amplitude: float = 0.0
-    y_amplitude: float = 0.02
-    cycles: float = 10.0
-    seed: int = 0
+    x_amplitude: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
+    y_amplitude: float | Sequence[float] | npt.NDArray[np.float64] = 0.02
+    cycles: float | Sequence[float] | npt.NDArray[np.float64] = 10.0
+    seed: int | Sequence[int] | npt.NDArray[np.int64] = 0
 
     def __post_init__(self) -> None:
-        if self.x_amplitude < 0.0 or self.y_amplitude < 0.0:
-            raise ValueError("Jitter amplitudes must be non-negative.")
-        if self.cycles <= 0.0:
-            raise ValueError("cycles must be positive.")
+        _normalize_jitter_components(
+            self.x_amplitude,
+            self.cycles,
+            self.seed,
+            amplitude_name="x_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
+        _normalize_jitter_components(
+            self.y_amplitude,
+            self.cycles,
+            self.seed,
+            amplitude_name="y_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         return self._perturbed_scene(scene, progress)
@@ -1302,7 +1454,26 @@ class JitterTransition(Transition):
 
         progress = _clamp_progress(progress)
         envelope = float(np.sin(np.pi * progress))
-        if envelope <= 0.0 or (self.x_amplitude == 0.0 and self.y_amplitude == 0.0):
+        x_components, _, _ = _normalize_jitter_components(
+            self.x_amplitude,
+            self.cycles,
+            self.seed,
+            amplitude_name="x_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
+        y_components, _, _ = _normalize_jitter_components(
+            self.y_amplitude,
+            self.cycles,
+            self.seed,
+            amplitude_name="y_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
+        if envelope <= 0.0 or (
+            all(amplitude == 0.0 for amplitude in x_components)
+            and all(amplitude == 0.0 for amplitude in y_components)
+        ):
             return scene
 
         x_offset = _jitter_x_offset(
@@ -1334,32 +1505,43 @@ class JitterTransition(Transition):
 @dataclass(frozen=True)
 class JitterFillBetweenTransition(Transition):
     fill_id: str
-    x_amplitude: float = 0.0
-    upper_y_amplitude: float | None = None
-    lower_y_amplitude: float | None = None
-    y1_amplitude: float = 0.02
-    y2_amplitude: float = 0.0
-    cycles: float | None = None
-    seed: int | None = None
-    upper_cycles: float | None = None
-    lower_cycles: float | None = None
-    upper_seed: int | None = None
-    lower_seed: int | None = None
+    x_amplitude: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
+    upper_y_amplitude: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    lower_y_amplitude: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    y1_amplitude: float | Sequence[float] | npt.NDArray[np.float64] = 0.02
+    y2_amplitude: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
+    cycles: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    seed: int | Sequence[int] | npt.NDArray[np.int64] | None = None
+    upper_cycles: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    lower_cycles: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    upper_seed: int | Sequence[int] | npt.NDArray[np.int64] | None = None
+    lower_seed: int | Sequence[int] | npt.NDArray[np.int64] | None = None
 
     def __post_init__(self) -> None:
-        if self.x_amplitude < 0.0:
-            raise ValueError("Jitter amplitudes must be non-negative.")
-        if (
-            self._effective_upper_y_amplitude() < 0.0
-            or self._effective_lower_y_amplitude() < 0.0
-        ):
-            raise ValueError("Jitter amplitudes must be non-negative.")
-        if (
-            self._effective_x_cycles() <= 0.0
-            or self._effective_upper_cycles() <= 0.0
-            or self._effective_lower_cycles() <= 0.0
-        ):
-            raise ValueError("cycles must be positive.")
+        _normalize_jitter_components(
+            self.x_amplitude,
+            self._effective_x_cycles(),
+            self._effective_x_seed(),
+            amplitude_name="x_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
+        _normalize_jitter_components(
+            self._effective_upper_y_amplitude(),
+            self._effective_upper_cycles(),
+            self._effective_upper_seed(),
+            amplitude_name="upper_y_amplitude",
+            cycles_name="upper_cycles",
+            seed_name="upper_seed",
+        )
+        _normalize_jitter_components(
+            self._effective_lower_y_amplitude(),
+            self._effective_lower_cycles(),
+            self._effective_lower_seed(),
+            amplitude_name="lower_y_amplitude",
+            cycles_name="lower_cycles",
+            seed_name="lower_seed",
+        )
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         return self._perturbed_scene(scene, progress)
@@ -1383,10 +1565,34 @@ class JitterFillBetweenTransition(Transition):
 
         progress = _clamp_progress(progress)
         envelope = float(np.sin(np.pi * progress))
+        x_components, _, _ = _normalize_jitter_components(
+            self.x_amplitude,
+            self._effective_x_cycles(),
+            self._effective_x_seed(),
+            amplitude_name="x_amplitude",
+            cycles_name="cycles",
+            seed_name="seed",
+        )
+        upper_components, _, _ = _normalize_jitter_components(
+            self._effective_upper_y_amplitude(),
+            self._effective_upper_cycles(),
+            self._effective_upper_seed(),
+            amplitude_name="upper_y_amplitude",
+            cycles_name="upper_cycles",
+            seed_name="upper_seed",
+        )
+        lower_components, _, _ = _normalize_jitter_components(
+            self._effective_lower_y_amplitude(),
+            self._effective_lower_cycles(),
+            self._effective_lower_seed(),
+            amplitude_name="lower_y_amplitude",
+            cycles_name="lower_cycles",
+            seed_name="lower_seed",
+        )
         if envelope <= 0.0 or (
-            self.x_amplitude == 0.0
-            and self._effective_upper_y_amplitude() == 0.0
-            and self._effective_lower_y_amplitude() == 0.0
+            all(amplitude == 0.0 for amplitude in x_components)
+            and all(amplitude == 0.0 for amplitude in upper_components)
+            and all(amplitude == 0.0 for amplitude in lower_components)
         ):
             return scene
 
@@ -1426,60 +1632,76 @@ class JitterFillBetweenTransition(Transition):
         )
         return scene.update_fill(perturbed_fill)
 
-    def _effective_upper_y_amplitude(self) -> float:
+    def _effective_upper_y_amplitude(
+        self,
+    ) -> float | Sequence[float] | npt.NDArray[np.float64]:
         if self.upper_y_amplitude is not None:
-            return float(self.upper_y_amplitude)
-        return float(self.y1_amplitude)
+            return self.upper_y_amplitude
+        return self.y1_amplitude
 
-    def _effective_lower_y_amplitude(self) -> float:
+    def _effective_lower_y_amplitude(
+        self,
+    ) -> float | Sequence[float] | npt.NDArray[np.float64]:
         if self.lower_y_amplitude is not None:
-            return float(self.lower_y_amplitude)
-        return float(self.y2_amplitude)
+            return self.lower_y_amplitude
+        return self.y2_amplitude
 
-    def _effective_upper_cycles(self) -> float:
+    def _effective_upper_cycles(
+        self,
+    ) -> float | Sequence[float] | npt.NDArray[np.float64]:
         if self.upper_cycles is not None:
-            return float(self.upper_cycles)
+            return self.upper_cycles
         if self.cycles is not None:
-            return float(self.cycles)
+            return self.cycles
         return 10.0
 
-    def _effective_lower_cycles(self) -> float:
+    def _effective_lower_cycles(
+        self,
+    ) -> float | Sequence[float] | npt.NDArray[np.float64]:
         if self.lower_cycles is not None:
-            return float(self.lower_cycles)
+            return self.lower_cycles
         if self.cycles is not None:
-            return float(self.cycles)
+            return self.cycles
         return 10.0
 
-    def _effective_upper_seed(self) -> int:
+    def _effective_upper_seed(
+        self,
+    ) -> int | Sequence[int] | npt.NDArray[np.int64]:
         if self.upper_seed is not None:
-            return int(self.upper_seed)
+            return self.upper_seed
         if self.seed is not None:
-            return int(self.seed)
+            return self.seed
         return 0
 
-    def _effective_lower_seed(self) -> int:
+    def _effective_lower_seed(
+        self,
+    ) -> int | Sequence[int] | npt.NDArray[np.int64]:
         if self.lower_seed is not None:
-            return int(self.lower_seed)
+            return self.lower_seed
         if self.seed is not None:
-            return int(self.seed + 1)
+            if isinstance(self.seed, np.ndarray):
+                return np.asarray(self.seed, dtype=int) + 1
+            if isinstance(self.seed, Sequence) and not isinstance(self.seed, (str, bytes)):
+                return [int(value) + 1 for value in self.seed]
+            return int(self.seed) + 1
         return 1
 
-    def _effective_x_cycles(self) -> float:
+    def _effective_x_cycles(self) -> float | Sequence[float] | npt.NDArray[np.float64]:
         if self.cycles is not None:
-            return float(self.cycles)
+            return self.cycles
         if self.upper_cycles is not None:
-            return float(self.upper_cycles)
+            return self.upper_cycles
         if self.lower_cycles is not None:
-            return float(self.lower_cycles)
+            return self.lower_cycles
         return 10.0
 
-    def _effective_x_seed(self) -> int:
+    def _effective_x_seed(self) -> int | Sequence[int] | npt.NDArray[np.int64]:
         if self.seed is not None:
-            return int(self.seed)
+            return self.seed
         if self.upper_seed is not None:
-            return int(self.upper_seed)
+            return self.upper_seed
         if self.lower_seed is not None:
-            return int(self.lower_seed)
+            return self.lower_seed
         return 0
 
 

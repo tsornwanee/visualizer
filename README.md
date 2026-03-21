@@ -129,7 +129,7 @@ schedule.add(
 )
 ```
 
-Jitter a curve and its fill together:
+Jitter a curve and its fill together, including multiple frequencies:
 
 ```python
 from visualizer import Jitter, JitterFillBetween, Parallel
@@ -137,19 +137,39 @@ from visualizer import Jitter, JitterFillBetween, Parallel
 schedule.add(
     Parallel(
         (
-            Jitter("wave", y_amplitude=0.03, cycles=10.0, seed=7),
+            Jitter(
+                "wave",
+                y_amplitude=[0.02, 0.01],
+                cycles=[6.0, 14.0],
+                seed=7,
+            ),
             JitterFillBetween(
                 "wave_fill",
-                upper_y_amplitude=0.03,
-                lower_y_amplitude=0.01,
-                upper_cycles=10.0,
-                lower_cycles=7.0,
+                upper_y_amplitude=[0.02, 0.01],
+                lower_y_amplitude=[0.006, 0.004],
+                upper_cycles=[6.0, 14.0],
+                lower_cycles=[4.0, 9.0],
                 upper_seed=7,
                 lower_seed=21,
             ),
         )
     ),
     duration=0.8,
+)
+```
+
+Move a curve while changing its clip window:
+
+```python
+schedule.add(
+    Move(
+        "wave",
+        x_prime=None,
+        y_prime=y_square,
+        domain=(0.1, 0.9),
+        value_range=(0.05, 0.8),
+    ),
+    duration=1.2,
 )
 ```
 
