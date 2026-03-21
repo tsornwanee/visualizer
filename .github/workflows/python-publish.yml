@@ -6,7 +6,7 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-name: Upload Python Package
+name: Publish to PyPI
 
 on:
   release:
@@ -28,8 +28,8 @@ jobs:
 
       - name: Build release distributions
         run: |
-          # NOTE: put your own distribution build steps here.
-          python -m pip install build
+          python -m pip install --upgrade pip
+          python -m pip install -e .[publish]
           python -m build
 
       - name: Upload distributions

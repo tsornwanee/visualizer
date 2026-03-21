@@ -741,11 +741,11 @@ class EraseFillBetweenTransition(Transition):
         return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MoveTransition(Transition):
     curve_id: str
-    x_prime: npt.ArrayLike | None
-    y_prime: npt.ArrayLike
+    newx: npt.ArrayLike | None = None
+    newy: npt.ArrayLike | None = None
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
@@ -754,17 +754,53 @@ class MoveTransition(Transition):
     value_range: Bounds | None = None
     line_kwargs: Mapping[str, Any] | None = field(default=None)
 
+    def __init__(
+        self,
+        curve_id: str,
+        newx: npt.ArrayLike | None = None,
+        newy: npt.ArrayLike | None = None,
+        *,
+        x_prime: npt.ArrayLike | None = None,
+        y_prime: npt.ArrayLike | None = None,
+        color: str | None = None,
+        alpha: float | None = None,
+        linestyle: str | None = None,
+        linewidth: float | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+        line_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        if newx is not None and x_prime is not None:
+            raise ValueError("newx and x_prime cannot both be provided.")
+        if newy is not None and y_prime is not None:
+            raise ValueError("newy and y_prime cannot both be provided.")
+
+        object.__setattr__(self, "curve_id", curve_id)
+        object.__setattr__(self, "newx", x_prime if newx is None else newx)
+        object.__setattr__(self, "newy", y_prime if newy is None else newy)
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "alpha", alpha)
+        object.__setattr__(self, "linestyle", linestyle)
+        object.__setattr__(self, "linewidth", linewidth)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "value_range", value_range)
+        object.__setattr__(self, "line_kwargs", line_kwargs)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        y_prime = _coerce_coordinate_array(self.y_prime, "y_prime")
-        x_prime = None
-        if self.x_prime is not None:
-            x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
+        if self.newy is None:
+            raise TypeError("MoveTransition requires newy.")
 
-        if x_prime is not None and x_prime.shape != y_prime.shape:
-            raise ValueError("x_prime and y_prime must have the same shape.")
+        newy = _coerce_coordinate_array(self.newy, "newy")
+        newx = None
+        if self.newx is not None:
+            newx = _coerce_coordinate_array(self.newx, "newx")
 
-        object.__setattr__(self, "x_prime", x_prime)
-        object.__setattr__(self, "y_prime", y_prime)
+        if newx is not None and newx.shape != newy.shape:
+            raise ValueError("newx and newy must have the same shape.")
+
+        object.__setattr__(self, "newx", newx)
+        object.__setattr__(self, "newy", newy)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
         object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
         object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
@@ -773,12 +809,12 @@ class MoveTransition(Transition):
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         source_curve = scene.get_curve(self.curve_id)
-        x_prime = self._effective_x_prime(source_curve)
-        self._validate_source_shape(source_curve, x_prime)
+        newx = self._effective_newx(source_curve)
+        self._validate_source_shape(source_curve, newx)
 
         t = _clamp_progress(progress)
-        x_values = source_curve.x + (x_prime - source_curve.x) * t
-        y_values = source_curve.y + (self.y_prime - source_curve.y) * t
+        x_values = source_curve.x + (newx - source_curve.x) * t
+        y_values = source_curve.y + (self.newy - source_curve.y) * t
 
         return scene.update_curve(
             self._updated_curve(
@@ -792,13 +828,13 @@ class MoveTransition(Transition):
 
     def apply(self, scene: Scene) -> Scene:
         source_curve = scene.get_curve(self.curve_id)
-        x_prime = self._effective_x_prime(source_curve)
-        self._validate_source_shape(source_curve, x_prime)
+        newx = self._effective_newx(source_curve)
+        self._validate_source_shape(source_curve, newx)
         return scene.update_curve(
             self._updated_curve(
                 source_curve,
-                x_prime,
-                self.y_prime,
+                newx,
+                self.newy,
                 domain=self.domain,
                 value_range=self.value_range,
             )
@@ -825,10 +861,10 @@ class MoveTransition(Transition):
             line_kwargs=source_curve.line_kwargs if self.line_kwargs is None else self.line_kwargs,
         )
 
-    def _effective_x_prime(self, source_curve: Curve) -> FloatArray:
-        if self.x_prime is None:
+    def _effective_newx(self, source_curve: Curve) -> FloatArray:
+        if self.newx is None:
             return source_curve.x
-        return self.x_prime
+        return self.newx
 
     def _interpolated_domain(self, source_curve: Curve, progress: float) -> Bounds | None:
         if self.domain is None:
@@ -853,20 +889,20 @@ class MoveTransition(Transition):
     def _validate_source_shape(
         self,
         source_curve: Curve,
-        x_prime: FloatArray,
+        newx: FloatArray,
     ) -> None:
-        if source_curve.x.shape != x_prime.shape or source_curve.x.shape != self.y_prime.shape:
+        if source_curve.x.shape != newx.shape or source_curve.x.shape != self.newy.shape:
             raise ValueError(
-                "MoveTransition requires x_prime and y_prime to match the source curve shape."
+                "MoveTransition requires newx and newy to match the source curve shape."
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MoveFillBetweenTransition(Transition):
     fill_id: str
-    x_prime: npt.ArrayLike | None
-    y1_prime: npt.ArrayLike
-    y2_prime: npt.ArrayLike | float
+    newx: npt.ArrayLike | None = None
+    newy1: npt.ArrayLike | None = None
+    newy2: npt.ArrayLike | float | None = None
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
@@ -875,20 +911,61 @@ class MoveFillBetweenTransition(Transition):
     value_range: Bounds | None = None
     fill_kwargs: Mapping[str, Any] | None = field(default=None)
 
+    def __init__(
+        self,
+        fill_id: str,
+        newx: npt.ArrayLike | None = None,
+        newy1: npt.ArrayLike | None = None,
+        newy2: npt.ArrayLike | float | None = None,
+        *,
+        x_prime: npt.ArrayLike | None = None,
+        y1_prime: npt.ArrayLike | None = None,
+        y2_prime: npt.ArrayLike | float | None = None,
+        color: str | None = None,
+        alpha: float | None = None,
+        linestyle: str | None = None,
+        linewidth: float | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+        fill_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        if newx is not None and x_prime is not None:
+            raise ValueError("newx and x_prime cannot both be provided.")
+        if newy1 is not None and y1_prime is not None:
+            raise ValueError("newy1 and y1_prime cannot both be provided.")
+        if newy2 is not None and y2_prime is not None:
+            raise ValueError("newy2 and y2_prime cannot both be provided.")
+
+        object.__setattr__(self, "fill_id", fill_id)
+        object.__setattr__(self, "newx", x_prime if newx is None else newx)
+        object.__setattr__(self, "newy1", y1_prime if newy1 is None else newy1)
+        object.__setattr__(self, "newy2", y2_prime if newy2 is None else newy2)
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "alpha", alpha)
+        object.__setattr__(self, "linestyle", linestyle)
+        object.__setattr__(self, "linewidth", linewidth)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "value_range", value_range)
+        object.__setattr__(self, "fill_kwargs", fill_kwargs)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        y1_prime = _coerce_coordinate_array(self.y1_prime, "y1_prime")
-        x_prime = None
-        if self.x_prime is not None:
-            x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
+        if self.newy1 is None or self.newy2 is None:
+            raise TypeError("MoveFillBetweenTransition requires newy1 and newy2.")
 
-        if x_prime is not None and x_prime.shape != y1_prime.shape:
-            raise ValueError("x_prime and y1_prime must have the same shape.")
+        newy1 = _coerce_coordinate_array(self.newy1, "newy1")
+        newx = None
+        if self.newx is not None:
+            newx = _coerce_coordinate_array(self.newx, "newx")
 
-        y2_prime = _coerce_matching_coordinate_array(self.y2_prime, "y2_prime", y1_prime.shape)
+        if newx is not None and newx.shape != newy1.shape:
+            raise ValueError("newx and newy1 must have the same shape.")
 
-        object.__setattr__(self, "x_prime", x_prime)
-        object.__setattr__(self, "y1_prime", y1_prime)
-        object.__setattr__(self, "y2_prime", y2_prime)
+        newy2 = _coerce_matching_coordinate_array(self.newy2, "newy2", newy1.shape)
+
+        object.__setattr__(self, "newx", newx)
+        object.__setattr__(self, "newy1", newy1)
+        object.__setattr__(self, "newy2", newy2)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
         object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
         object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
@@ -897,13 +974,13 @@ class MoveFillBetweenTransition(Transition):
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         source_fill = scene.get_fill(self.fill_id)
-        x_prime = self._effective_x_prime(source_fill)
-        self._validate_source_shape(source_fill, x_prime)
+        newx = self._effective_newx(source_fill)
+        self._validate_source_shape(source_fill, newx)
 
         t = _clamp_progress(progress)
-        x_values = source_fill.x + (x_prime - source_fill.x) * t
-        y1_values = source_fill.y1 + (self.y1_prime - source_fill.y1) * t
-        y2_values = source_fill.y2 + (self.y2_prime - source_fill.y2) * t
+        x_values = source_fill.x + (newx - source_fill.x) * t
+        y1_values = source_fill.y1 + (self.newy1 - source_fill.y1) * t
+        y2_values = source_fill.y2 + (self.newy2 - source_fill.y2) * t
 
         return scene.update_fill(
             self._updated_fill(
@@ -918,14 +995,14 @@ class MoveFillBetweenTransition(Transition):
 
     def apply(self, scene: Scene) -> Scene:
         source_fill = scene.get_fill(self.fill_id)
-        x_prime = self._effective_x_prime(source_fill)
-        self._validate_source_shape(source_fill, x_prime)
+        newx = self._effective_newx(source_fill)
+        self._validate_source_shape(source_fill, newx)
         return scene.update_fill(
             self._updated_fill(
                 source_fill,
-                x_prime,
-                self.y1_prime,
-                self.y2_prime,
+                newx,
+                self.newy1,
+                self.newy2,
                 domain=self.domain,
                 value_range=self.value_range,
             )
@@ -954,10 +1031,10 @@ class MoveFillBetweenTransition(Transition):
             fill_kwargs=source_fill.fill_kwargs if self.fill_kwargs is None else self.fill_kwargs,
         )
 
-    def _effective_x_prime(self, source_fill: FillBetweenArea) -> FloatArray:
-        if self.x_prime is None:
+    def _effective_newx(self, source_fill: FillBetweenArea) -> FloatArray:
+        if self.newx is None:
             return source_fill.x
-        return self.x_prime
+        return self.newx
 
     def _interpolated_domain(
         self,
@@ -993,15 +1070,15 @@ class MoveFillBetweenTransition(Transition):
     def _validate_source_shape(
         self,
         source_fill: FillBetweenArea,
-        x_prime: FloatArray,
+        newx: FloatArray,
     ) -> None:
         if (
-            source_fill.x.shape != x_prime.shape
-            or source_fill.x.shape != self.y1_prime.shape
-            or source_fill.x.shape != self.y2_prime.shape
+            source_fill.x.shape != newx.shape
+            or source_fill.x.shape != self.newy1.shape
+            or source_fill.x.shape != self.newy2.shape
         ):
             raise ValueError(
-                "MoveFillBetweenTransition requires target arrays to match the source fill shape."
+                "MoveFillBetweenTransition requires newx, newy1, and newy2 to match the source fill shape."
             )
 
 
@@ -1148,11 +1225,11 @@ class EraseTextTransition(Transition):
         return scene.remove_text(self.text_id)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MoveTextTransition(Transition):
     text_id: str
-    x_prime: float | None = None
-    y_prime: float | None = None
+    newx: float | None = None
+    newy: float | None = None
     content: str | None = None
     color: str | None = None
     alpha: float | None = None
@@ -1165,11 +1242,52 @@ class MoveTextTransition(Transition):
     text_kwargs: Mapping[str, Any] | None = field(default=None)
     interpolate_color: bool = True
 
+    def __init__(
+        self,
+        text_id: str,
+        newx: float | None = None,
+        newy: float | None = None,
+        *,
+        x_prime: float | None = None,
+        y_prime: float | None = None,
+        content: str | None = None,
+        color: str | None = None,
+        alpha: float | None = None,
+        fontsize: float | None = None,
+        ha: str | None = None,
+        va: str | None = None,
+        rotation: float | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+        text_kwargs: Mapping[str, Any] | None = None,
+        interpolate_color: bool = True,
+    ) -> None:
+        if newx is not None and x_prime is not None:
+            raise ValueError("newx and x_prime cannot both be provided.")
+        if newy is not None and y_prime is not None:
+            raise ValueError("newy and y_prime cannot both be provided.")
+
+        object.__setattr__(self, "text_id", text_id)
+        object.__setattr__(self, "newx", x_prime if newx is None else newx)
+        object.__setattr__(self, "newy", y_prime if newy is None else newy)
+        object.__setattr__(self, "content", content)
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "alpha", alpha)
+        object.__setattr__(self, "fontsize", fontsize)
+        object.__setattr__(self, "ha", ha)
+        object.__setattr__(self, "va", va)
+        object.__setattr__(self, "rotation", rotation)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "value_range", value_range)
+        object.__setattr__(self, "text_kwargs", text_kwargs)
+        object.__setattr__(self, "interpolate_color", interpolate_color)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        if self.x_prime is not None and not np.isfinite(self.x_prime):
-            raise ValueError("x_prime must be finite.")
-        if self.y_prime is not None and not np.isfinite(self.y_prime):
-            raise ValueError("y_prime must be finite.")
+        if self.newx is not None and not np.isfinite(self.newx):
+            raise ValueError("newx must be finite.")
+        if self.newy is not None and not np.isfinite(self.newy):
+            raise ValueError("newy must be finite.")
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
         if self.fontsize is not None and self.fontsize < 0:
             raise ValueError("fontsize must be non-negative.")
@@ -1205,8 +1323,8 @@ class MoveTextTransition(Transition):
             rotation = _interpolate_float(_current_text_rotation(text), self.rotation, t)
 
         updated_text = text.copy_with(
-            x=_interpolate_float(text.x, self._effective_x_prime(text), t),
-            y=_interpolate_float(text.y, self._effective_y_prime(text), t),
+            x=_interpolate_float(text.x, self._effective_newx(text), t),
+            y=_interpolate_float(text.y, self._effective_newy(text), t),
             color=color,
             alpha=alpha,
             fontsize=fontsize,
@@ -1219,8 +1337,8 @@ class MoveTextTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         text = scene.get_text(self.text_id)
         updated_text = text.copy_with(
-            x=self._effective_x_prime(text),
-            y=self._effective_y_prime(text),
+            x=self._effective_newx(text),
+            y=self._effective_newy(text),
             content=self.content,
             color=self.color,
             alpha=self.alpha,
@@ -1234,15 +1352,15 @@ class MoveTextTransition(Transition):
         )
         return scene.update_text(updated_text)
 
-    def _effective_x_prime(self, text: Text) -> float:
-        if self.x_prime is None:
+    def _effective_newx(self, text: Text) -> float:
+        if self.newx is None:
             return text.x
-        return float(self.x_prime)
+        return float(self.newx)
 
-    def _effective_y_prime(self, text: Text) -> float:
-        if self.y_prime is None:
+    def _effective_newy(self, text: Text) -> float:
+        if self.newy is None:
             return text.y
-        return float(self.y_prime)
+        return float(self.newy)
 
     def _interpolated_domain(self, text: Text, progress: float) -> Bounds | None:
         if self.domain is None:

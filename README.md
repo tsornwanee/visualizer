@@ -26,8 +26,22 @@ Curves, fills, and text can use arbitrary finite plot coordinates.
 
 ## Installation
 
+Install from the repository for local development:
+
 ```bash
 pip install -e .
+```
+
+Install the publish tooling when preparing a release:
+
+```bash
+pip install -e .[publish]
+```
+
+Install the notebook tooling when running the demos locally:
+
+```bash
+pip install -e .[notebooks]
 ```
 
 ## Quick Start
@@ -101,7 +115,7 @@ act_1.add(Draw(Curve("u", x, y, color="#dc2626", linewidth=3.0)), duration=1.5)
 
 act_2 = act_1.next_act()
 act_2.add_break(0.5)
-act_2.add(Move("u", x_prime=None, y_prime=y_prime), duration=1.25)
+act_2.add(Move("u", newy=y_prime), duration=1.25)
 
 act_3 = act_2.next_act()
 act_3.add(Erase("u"), duration=1.0)
@@ -124,7 +138,7 @@ schedule.add(
     duration=0.4,
 )
 schedule.add(
-    MoveText("label", x_prime=0.65, y_prime=0.55, color="#dc2626", rotation=-12),
+    MoveText("label", newx=0.65, newy=0.55, color="#dc2626", rotation=-12),
     duration=0.8,
 )
 ```
@@ -158,14 +172,20 @@ schedule.add(
 )
 ```
 
+You can still use the original scalar form as well:
+
+```python
+Jitter("wave", y_amplitude=0.03, cycles=10.0, seed=7)
+JitterFillBetween("wave_fill", y1_amplitude=0.03, y2_amplitude=0.0, cycles=10.0, seed=7)
+```
+
 Move a curve while changing its clip window:
 
 ```python
 schedule.add(
     Move(
         "wave",
-        x_prime=None,
-        y_prime=y_square,
+        newy=y_square,
         domain=(0.1, 0.9),
         value_range=(0.05, 0.8),
     ),
@@ -213,6 +233,19 @@ For lines, geometry outside the window is hidden and the visible parts are split
 
 - [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, and combined-transition examples
 - [`notebooks/modular_scheduling.ipynb`](notebooks/modular_scheduling.ipynb): act-based scheduling with `next_act()` and `Schedule.combine(...)`
+
+## Publishing
+
+The repository includes:
+
+- package metadata in `pyproject.toml`
+- a release workflow in `.github/workflows/python-publish.yml`
+- a packaging CI workflow in `.github/workflows/package-check.yml`
+- release notes in [`CHANGELOG.md`](CHANGELOG.md)
+- contributor setup in [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- a release checklist in [`RELEASING.md`](RELEASING.md)
+
+If you plan to publish to PyPI, check the release guide first. In particular, confirm that your chosen distribution name is available before the first release.
 
 ## Versioning
 

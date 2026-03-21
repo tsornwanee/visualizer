@@ -5,12 +5,55 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "visualizer"
 version = "0.1.0"
-description = "Matplotlib-backed graph visualization animation primitives."
-readme = "README.md"
+description = "Graph animation primitives for Matplotlib-based mathematical visualizations."
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 dependencies = [
   "matplotlib>=3.8",
   "numpy>=1.26",
+]
+keywords = [
+  "animation",
+  "matplotlib",
+  "visualization",
+  "notebook",
+  "graphs",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Visualization",
+]
+
+[project.urls]
+Homepage = "https://github.com/tsornwanee/visualizer"
+Repository = "https://github.com/tsornwanee/visualizer"
+Issues = "https://github.com/tsornwanee/visualizer/issues"
+Changelog = "https://github.com/tsornwanee/visualizer/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+publish = [
+  "build>=1.2",
+  "twine>=5.1",
+]
+notebooks = [
+  "ipykernel>=6.29",
+  "jupyter>=1.0",
+]
+dev = [
+  "build>=1.2",
+  "twine>=5.1",
+  "ipykernel>=6.29",
+  "jupyter>=1.0",
 ]
 
 [tool.setuptools]
