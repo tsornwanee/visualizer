@@ -45,6 +45,23 @@ def _clamp_progress(progress: float) -> float:
     return float(np.clip(progress, 0.0, 1.0))
 
 
+def _resolve_x_domain(
+    x_values: FloatArray,
+    timeline_domain: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if timeline_domain is None:
+        start = float(np.min(x_values))
+        end = float(np.max(x_values))
+    else:
+        start, end = map(float, timeline_domain)
+        if not np.isfinite(start) or not np.isfinite(end):
+            raise ValueError("timeline_domain must contain only finite values.")
+        if start > end:
+            start, end = end, start
+
+    return start, end
+
+
 def _validate_alpha(alpha: float | None) -> float | None:
     if alpha is None:
         return None
@@ -138,33 +155,61 @@ class Curve:
     def reveal_until(self, progress: float) -> Curve:
         """Reveal points from left to right based on normalized progress."""
 
+        return self.reveal_by_progress(progress)
+
+    def reveal_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> Curve:
         threshold = _clamp_progress(progress)
         if self.is_empty:
             return self
 
-        x_min = float(np.min(self.x))
-        x_max = float(np.max(self.x))
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
         if np.isclose(x_min, x_max):
             mask = np.full(self.x.shape, threshold > 0.0, dtype=bool)
         else:
-            x_threshold = x_min + (x_max - x_min) * threshold
-            mask = self.x <= x_threshold
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x <= x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x >= x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
         return self.copy_with(x=self.x[mask], y=self.y[mask])
 
     def hide_until(self, progress: float) -> Curve:
         """Hide points from left to right based on normalized progress."""
 
+        return self.hide_by_progress(progress)
+
+    def hide_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> Curve:
         threshold = _clamp_progress(progress)
         if self.is_empty:
             return self
 
-        x_min = float(np.min(self.x))
-        x_max = float(np.max(self.x))
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
         if np.isclose(x_min, x_max):
             mask = np.full(self.x.shape, threshold < 1.0, dtype=bool)
         else:
-            x_threshold = x_min + (x_max - x_min) * threshold
-            mask = self.x > x_threshold
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x > x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x < x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
         return self.copy_with(x=self.x[mask], y=self.y[mask])
 
 
@@ -235,31 +280,59 @@ class FillBetweenArea:
         )
 
     def reveal_until(self, progress: float) -> FillBetweenArea:
+        return self.reveal_by_progress(progress)
+
+    def reveal_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> FillBetweenArea:
         threshold = _clamp_progress(progress)
         if self.is_empty:
             return self
 
-        x_min = float(np.min(self.x))
-        x_max = float(np.max(self.x))
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
         if np.isclose(x_min, x_max):
             mask = np.full(self.x.shape, threshold > 0.0, dtype=bool)
         else:
-            x_threshold = x_min + (x_max - x_min) * threshold
-            mask = self.x <= x_threshold
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x <= x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x >= x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
         return self.copy_with(x=self.x[mask], y1=self.y1[mask], y2=self.y2[mask])
 
     def hide_until(self, progress: float) -> FillBetweenArea:
+        return self.hide_by_progress(progress)
+
+    def hide_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> FillBetweenArea:
         threshold = _clamp_progress(progress)
         if self.is_empty:
             return self
 
-        x_min = float(np.min(self.x))
-        x_max = float(np.max(self.x))
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
         if np.isclose(x_min, x_max):
             mask = np.full(self.x.shape, threshold < 1.0, dtype=bool)
         else:
-            x_threshold = x_min + (x_max - x_min) * threshold
-            mask = self.x > x_threshold
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x > x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x < x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
         return self.copy_with(x=self.x[mask], y1=self.y1[mask], y2=self.y2[mask])
 
 

@@ -68,6 +68,27 @@ def _current_fill_linewidth(fill: FillBetweenArea) -> float:
     return float(linewidth)
 
 
+def _validate_direction(direction: str) -> str:
+    if direction not in {"forward", "backward"}:
+        raise ValueError("direction must be 'forward' or 'backward'.")
+    return direction
+
+
+def _normalize_timeline_domain(
+    timeline_domain: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    if timeline_domain is None:
+        return None
+
+    start, end = map(float, timeline_domain)
+    if not np.isfinite(start) or not np.isfinite(end):
+        raise ValueError("timeline_domain must contain only finite values.")
+    if start > end:
+        start, end = end, start
+
+    return (start, end)
+
+
 @dataclass(frozen=True)
 class PointerOverlay:
     x: float
@@ -115,7 +136,13 @@ class Transition(ABC):
     def apply(self, scene: Scene) -> Scene:
         """Return the scene after the transition completes."""
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
         return FrameState(scene=self.interpolate(scene, progress))
 
 
@@ -148,18 +175,49 @@ class ParallelTransition(Transition):
             current_scene = transition.apply(current_scene)
         return current_scene
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
         current_scene = scene
         pointers: list[PointerOverlay] = []
         glows: list[GlowOverlay] = []
+        shared_domain = timeline_domain or self._shared_timeline_domain(scene)
 
         for transition in self.transitions:
-            state = transition.frame_state(current_scene, progress)
+            state = transition.frame_state(
+                current_scene,
+                progress,
+                timeline_domain=shared_domain,
+            )
             current_scene = state.scene
             pointers.extend(state.pointers)
             glows.extend(state.glows)
 
         return FrameState(scene=current_scene, pointers=tuple(pointers), glows=tuple(glows))
+
+    def _shared_timeline_domain(self, scene: Scene) -> tuple[float, float] | None:
+        domains: list[tuple[float, float]] = []
+        current_scene = scene
+
+        for transition in self.transitions:
+            timeline_getter = getattr(transition, "_timeline_domain", None)
+            if callable(timeline_getter):
+                domain = timeline_getter(current_scene)
+                if domain is not None:
+                    domains.append(domain)
+            current_scene = transition.apply(current_scene)
+
+        if not domains:
+            return None
+
+        return (
+            min(domain[0] for domain in domains),
+            max(domain[1] for domain in domains),
+        )
 
 
 @dataclass(frozen=True)
@@ -167,15 +225,23 @@ class DrawTransition(Transition):
     curve: Curve
     show_pointer: bool = True
     pointer_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "pointer_kwargs", dict(self.pointer_kwargs))
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         if scene.contains_curve(self.curve.curve_id):
             raise ValueError(f"Curve {self.curve.curve_id!r} already exists in the scene.")
 
-        partial_curve = self.curve.reveal_until(_clamp_progress(progress))
+        partial_curve = self.curve.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(None),
+            direction=self.direction,
+        )
         updated = dict(scene.curves)
         updated[self.curve.curve_id] = partial_curve
         return Scene(curves=updated, fills=scene.fills)
@@ -183,8 +249,14 @@ class DrawTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         return scene.add_curve(self.curve)
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
-        in_between_scene = self.interpolate(scene, progress)
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        in_between_scene = self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
         pointers: tuple[PointerOverlay, ...] = ()
 
         if self.show_pointer:
@@ -204,24 +276,74 @@ class DrawTransition(Transition):
                 pointer_style.update(self.pointer_kwargs)
                 pointers = (
                     PointerOverlay(
-                        x=float(partial_curve.x[-1]),
-                        y=float(partial_curve.y[-1]),
+                        x=float(
+                            partial_curve.x[-1]
+                            if self.direction == "forward"
+                            else partial_curve.x[0]
+                        ),
+                        y=float(
+                            partial_curve.y[-1]
+                            if self.direction == "forward"
+                            else partial_curve.y[0]
+                        ),
                         artist_kwargs=pointer_style,
                     ),
                 )
 
         return FrameState(scene=in_between_scene, pointers=pointers)
 
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        return self._effective_timeline_domain(None)
+
+    def _effective_timeline_domain(
+        self,
+        external_timeline_domain: tuple[float, float] | None,
+    ) -> tuple[float, float]:
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        if external_timeline_domain is not None:
+            return external_timeline_domain
+        return (float(np.min(self.curve.x)), float(np.max(self.curve.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        if scene.contains_curve(self.curve.curve_id):
+            raise ValueError(f"Curve {self.curve.curve_id!r} already exists in the scene.")
+
+        partial_curve = self.curve.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(timeline_domain),
+            direction=self.direction,
+        )
+        updated = dict(scene.curves)
+        updated[self.curve.curve_id] = partial_curve
+        return Scene(curves=updated, fills=scene.fills)
+
 
 @dataclass(frozen=True)
 class FillBetweenTransition(Transition):
     fill: FillBetweenArea
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         if scene.contains_fill(self.fill.fill_id):
             raise ValueError(f"Fill {self.fill.fill_id!r} already exists in the scene.")
 
-        partial_fill = self.fill.reveal_until(_clamp_progress(progress))
+        partial_fill = self.fill.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(None),
+            direction=self.direction,
+        )
         updated = dict(scene.fills)
         updated[self.fill.fill_id] = partial_fill
         return Scene(curves=scene.curves, fills=updated)
@@ -229,33 +351,156 @@ class FillBetweenTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         return scene.add_fill(self.fill)
 
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        return FrameState(
+            scene=self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
+        )
+
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        return self._effective_timeline_domain(None)
+
+    def _effective_timeline_domain(
+        self,
+        external_timeline_domain: tuple[float, float] | None,
+    ) -> tuple[float, float]:
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        if external_timeline_domain is not None:
+            return external_timeline_domain
+        return (float(np.min(self.fill.x)), float(np.max(self.fill.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        if scene.contains_fill(self.fill.fill_id):
+            raise ValueError(f"Fill {self.fill.fill_id!r} already exists in the scene.")
+
+        partial_fill = self.fill.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(timeline_domain),
+            direction=self.direction,
+        )
+        updated = dict(scene.fills)
+        updated[self.fill.fill_id] = partial_fill
+        return Scene(curves=scene.curves, fills=updated)
+
 
 @dataclass(frozen=True)
 class EraseTransition(Transition):
     curve_id: str
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
-        curve = scene.get_curve(self.curve_id)
-        updated = dict(scene.curves)
-        updated[self.curve_id] = curve.hide_until(_clamp_progress(progress))
-        return Scene(curves=updated, fills=scene.fills)
+        return self._interpolated_scene(scene, progress, timeline_domain=None)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.remove_curve(self.curve_id)
+
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        return FrameState(
+            scene=self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
+        )
+
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        curve = scene.get_curve(self.curve_id)
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        return (float(np.min(curve.x)), float(np.max(curve.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        curve = scene.get_curve(self.curve_id)
+        effective_domain = self.timeline_domain or timeline_domain or (
+            float(np.min(curve.x)),
+            float(np.max(curve.x)),
+        )
+        updated = dict(scene.curves)
+        updated[self.curve_id] = curve.hide_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=effective_domain,
+            direction=self.direction,
+        )
+        return Scene(curves=updated, fills=scene.fills)
 
 
 @dataclass(frozen=True)
 class EraseFillBetweenTransition(Transition):
     fill_id: str
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
-        fill = scene.get_fill(self.fill_id)
-        updated = dict(scene.fills)
-        updated[self.fill_id] = fill.hide_until(_clamp_progress(progress))
-        return Scene(curves=scene.curves, fills=updated)
+        return self._interpolated_scene(scene, progress, timeline_domain=None)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.remove_fill(self.fill_id)
+
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        return FrameState(
+            scene=self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
+        )
+
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        fill = scene.get_fill(self.fill_id)
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        return (float(np.min(fill.x)), float(np.max(fill.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        fill = scene.get_fill(self.fill_id)
+        effective_domain = self.timeline_domain or timeline_domain or (
+            float(np.min(fill.x)),
+            float(np.max(fill.x)),
+        )
+        updated = dict(scene.fills)
+        updated[self.fill_id] = fill.hide_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=effective_domain,
+            direction=self.direction,
+        )
+        return Scene(curves=scene.curves, fills=updated)
 
 
 @dataclass(frozen=True)
@@ -539,7 +784,13 @@ class StressTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         return scene
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
         curve = scene.get_curve(self.curve_id)
         if curve.is_empty:
             return FrameState(scene=scene)
@@ -591,7 +842,13 @@ class JitterTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         return scene
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
         return FrameState(scene=self._perturbed_scene(scene, progress))
 
     def _perturbed_scene(self, scene: Scene, progress: float) -> Scene:
@@ -642,7 +899,13 @@ class JitterFillBetweenTransition(Transition):
     def apply(self, scene: Scene) -> Scene:
         return scene
 
-    def frame_state(self, scene: Scene, progress: float) -> FrameState:
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
         return FrameState(scene=self._perturbed_scene(scene, progress))
 
     def _perturbed_scene(self, scene: Scene, progress: float) -> Scene:
