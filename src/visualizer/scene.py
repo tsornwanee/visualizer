@@ -8,6 +8,7 @@ import numpy.typing as npt
 
 
 FloatArray = npt.NDArray[np.float64]
+Bounds = tuple[float, float]
 
 
 def _coerce_coordinate_array(values: npt.ArrayLike, name: str) -> FloatArray:
@@ -62,6 +63,158 @@ def _resolve_x_domain(
     return start, end
 
 
+def _normalize_bounds(bounds: Bounds | None, name: str) -> Bounds | None:
+    if bounds is None:
+        return None
+
+    start, end = map(float, bounds)
+    if not np.isfinite(start) or not np.isfinite(end):
+        raise ValueError(f"{name} must contain only finite values.")
+    if start > end:
+        start, end = end, start
+
+    return (start, end)
+
+
+def _point_is_visible(
+    x_value: float,
+    y_value: float,
+    *,
+    domain: Bounds | None,
+    value_range: Bounds | None,
+) -> bool:
+    if domain is not None and not (domain[0] <= x_value <= domain[1]):
+        return False
+    if value_range is not None and not (value_range[0] <= y_value <= value_range[1]):
+        return False
+    return True
+
+
+def _points_close(x0: float, y0: float, x1: float, y1: float) -> bool:
+    return bool(np.isclose(x0, x1) and np.isclose(y0, y1))
+
+
+def _clip_segment_to_window(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    *,
+    domain: Bounds | None,
+    value_range: Bounds | None,
+) -> tuple[float, float, float, float] | None:
+    dx = x1 - x0
+    dy = y1 - y0
+    t_min = 0.0
+    t_max = 1.0
+
+    constraints: list[tuple[float, float]] = []
+    if domain is not None:
+        x_min, x_max = domain
+        constraints.extend(((-dx, x0 - x_min), (dx, x_max - x0)))
+    if value_range is not None:
+        y_min, y_max = value_range
+        constraints.extend(((-dy, y0 - y_min), (dy, y_max - y0)))
+
+    for p_value, q_value in constraints:
+        if np.isclose(p_value, 0.0):
+            if q_value < 0.0:
+                return None
+            continue
+
+        ratio = q_value / p_value
+        if p_value < 0.0:
+            if ratio > t_max:
+                return None
+            t_min = max(t_min, ratio)
+        else:
+            if ratio < t_min:
+                return None
+            t_max = min(t_max, ratio)
+
+    if t_min > t_max:
+        return None
+
+    return (
+        x0 + dx * t_min,
+        y0 + dy * t_min,
+        x0 + dx * t_max,
+        y0 + dy * t_max,
+    )
+
+
+def _clip_polyline_to_window(
+    x_values: FloatArray,
+    y_values: FloatArray,
+    *,
+    domain: Bounds | None,
+    value_range: Bounds | None,
+) -> tuple[FloatArray, FloatArray]:
+    if x_values.size == 0:
+        return x_values.copy(), y_values.copy()
+
+    if domain is None and value_range is None:
+        return x_values.copy(), y_values.copy()
+
+    if x_values.size == 1:
+        if _point_is_visible(
+            float(x_values[0]),
+            float(y_values[0]),
+            domain=domain,
+            value_range=value_range,
+        ):
+            return x_values.copy(), y_values.copy()
+        return (
+            np.asarray([], dtype=float),
+            np.asarray([], dtype=float),
+        )
+
+    clipped_x: list[float] = []
+    clipped_y: list[float] = []
+    segment_open = False
+
+    for index in range(x_values.size - 1):
+        clipped_segment = _clip_segment_to_window(
+            float(x_values[index]),
+            float(y_values[index]),
+            float(x_values[index + 1]),
+            float(y_values[index + 1]),
+            domain=domain,
+            value_range=value_range,
+        )
+        if clipped_segment is None:
+            segment_open = False
+            continue
+
+        x_start, y_start, x_end, y_end = clipped_segment
+        if (
+            not segment_open
+            or not clipped_x
+            or np.isnan(clipped_x[-1])
+            or not _points_close(clipped_x[-1], clipped_y[-1], x_start, y_start)
+        ):
+            if clipped_x and not np.isnan(clipped_x[-1]):
+                clipped_x.append(np.nan)
+                clipped_y.append(np.nan)
+            clipped_x.append(x_start)
+            clipped_y.append(y_start)
+        if not _points_close(clipped_x[-1], clipped_y[-1], x_end, y_end):
+            clipped_x.append(x_end)
+            clipped_y.append(y_end)
+        segment_open = True
+
+    if not clipped_x:
+        return (
+            np.asarray([], dtype=float),
+            np.asarray([], dtype=float),
+        )
+
+    return (
+        np.asarray(clipped_x, dtype=float),
+        np.asarray(clipped_y, dtype=float),
+    )
+
+
 def _validate_alpha(alpha: float | None) -> float | None:
     if alpha is None:
         return None
@@ -103,6 +256,8 @@ class Curve:
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
     line_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -115,6 +270,8 @@ class Curve:
         object.__setattr__(self, "x", x_array)
         object.__setattr__(self, "y", y_array)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_bounds(self.domain, "domain"))
+        object.__setattr__(self, "value_range", _normalize_bounds(self.value_range, "value_range"))
         object.__setattr__(self, "line_kwargs", dict(self.line_kwargs))
 
     @property
@@ -139,6 +296,8 @@ class Curve:
         alpha: float | None = None,
         linestyle: str | None = None,
         linewidth: float | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
         line_kwargs: Mapping[str, Any] | None = None,
     ) -> Curve:
         return Curve(
@@ -149,7 +308,43 @@ class Curve:
             alpha=self.alpha if alpha is None else alpha,
             linestyle=self.linestyle if linestyle is None else linestyle,
             linewidth=self.linewidth if linewidth is None else linewidth,
+            domain=self.domain if domain is None else domain,
+            value_range=self.value_range if value_range is None else value_range,
             line_kwargs=self.line_kwargs if line_kwargs is None else line_kwargs,
+        )
+
+    def clipped_line_data(self) -> tuple[FloatArray, FloatArray]:
+        return _clip_polyline_to_window(
+            self.x,
+            self.y,
+            domain=self.domain,
+            value_range=self.value_range,
+        )
+
+    def point_is_visible(self, x_value: float, y_value: float) -> bool:
+        return _point_is_visible(
+            x_value,
+            y_value,
+            domain=self.domain,
+            value_range=self.value_range,
+        )
+
+    def visible_extents(self) -> tuple[float, float, float, float] | None:
+        clipped_x, clipped_y = self.clipped_line_data()
+        if clipped_x.size == 0:
+            return None
+
+        visible_mask = ~(np.isnan(clipped_x) | np.isnan(clipped_y))
+        if not np.any(visible_mask):
+            return None
+
+        visible_x = clipped_x[visible_mask]
+        visible_y = clipped_y[visible_mask]
+        return (
+            float(np.min(visible_x)),
+            float(np.max(visible_x)),
+            float(np.min(visible_y)),
+            float(np.max(visible_y)),
         )
 
     def reveal_until(self, progress: float) -> Curve:
@@ -225,6 +420,8 @@ class FillBetweenArea:
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
     fill_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -240,6 +437,8 @@ class FillBetweenArea:
         object.__setattr__(self, "y1", y1_array)
         object.__setattr__(self, "y2", y2_array)
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_bounds(self.domain, "domain"))
+        object.__setattr__(self, "value_range", _normalize_bounds(self.value_range, "value_range"))
         object.__setattr__(self, "fill_kwargs", dict(self.fill_kwargs))
 
     @property
@@ -265,6 +464,8 @@ class FillBetweenArea:
         alpha: float | None = None,
         linestyle: str | None = None,
         linewidth: float | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
         fill_kwargs: Mapping[str, Any] | None = None,
     ) -> FillBetweenArea:
         return FillBetweenArea(
@@ -276,7 +477,54 @@ class FillBetweenArea:
             alpha=self.alpha if alpha is None else alpha,
             linestyle=self.linestyle if linestyle is None else linestyle,
             linewidth=self.linewidth if linewidth is None else linewidth,
+            domain=self.domain if domain is None else domain,
+            value_range=self.value_range if value_range is None else value_range,
             fill_kwargs=self.fill_kwargs if fill_kwargs is None else fill_kwargs,
+        )
+
+    def clipped_fill_data(self) -> tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]]:
+        if self.is_empty:
+            empty = np.asarray([], dtype=float)
+            return empty, empty, empty, np.asarray([], dtype=bool)
+
+        where = np.ones(self.x.shape, dtype=bool)
+        if self.domain is not None:
+            where &= (self.x >= self.domain[0]) & (self.x <= self.domain[1])
+
+        clipped_y1 = self.y1.copy()
+        clipped_y2 = self.y2.copy()
+        if self.value_range is not None:
+            clipped_y1 = np.clip(clipped_y1, self.value_range[0], self.value_range[1])
+            clipped_y2 = np.clip(clipped_y2, self.value_range[0], self.value_range[1])
+
+        return self.x.copy(), clipped_y1, clipped_y2, where
+
+    def visible_extents(self) -> tuple[float, float, float, float] | None:
+        if self.is_empty:
+            return None
+
+        x_values, y1_values, y2_values, where = self.clipped_fill_data()
+        if self.domain is not None:
+            x_min = max(float(np.min(self.x)), self.domain[0])
+            x_max = min(float(np.max(self.x)), self.domain[1])
+            if x_min > x_max:
+                return None
+        else:
+            if not np.any(where):
+                return None
+            visible_x = x_values[where]
+            x_min = float(np.min(visible_x))
+            x_max = float(np.max(visible_x))
+
+        if not np.any(where):
+            return None
+
+        visible_y = np.concatenate((y1_values[where], y2_values[where]))
+        return (
+            x_min,
+            x_max,
+            float(np.min(visible_y)),
+            float(np.max(visible_y)),
         )
 
     def reveal_until(self, progress: float) -> FillBetweenArea:

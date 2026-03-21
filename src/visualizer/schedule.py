@@ -74,8 +74,8 @@ class Schedule:
         fig: Figure | None = None,
         ax: Axes | None = None,
         fps: int = 30,
-        xlim: tuple[float, float] = (0.0, 1.0),
-        ylim: tuple[float, float] = (0.0, 1.0),
+        xlim: tuple[float, float] | None = None,
+        ylim: tuple[float, float] | None = None,
         title: str | None = None,
         blit: bool = False,
         repeat: bool = False,
@@ -98,8 +98,11 @@ class Schedule:
         assert fig is not None
         assert ax is not None
 
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
+        resolved_xlim = xlim or self._infer_axis_limits(curve_templates, fill_templates, axis="x")
+        resolved_ylim = ylim or self._infer_axis_limits(curve_templates, fill_templates, axis="y")
+
+        ax.set_xlim(*resolved_xlim)
+        ax.set_ylim(*resolved_ylim)
         if title is not None:
             ax.set_title(title)
 
@@ -124,9 +127,14 @@ class Schedule:
                         line.set_data([], [])
                         line.set_visible(False)
                     else:
-                        line.set_data(curve.x, curve.y)
-                        line.set(**curve.mpl_line_kwargs())
-                        line.set_visible(True)
+                        clipped_x, clipped_y = curve.clipped_line_data()
+                        if clipped_x.size == 0:
+                            line.set_data([], [])
+                            line.set_visible(False)
+                        else:
+                            line.set_data(clipped_x, clipped_y)
+                            line.set(**curve.mpl_line_kwargs())
+                            line.set_visible(True)
                 else:
                     line.set_data([], [])
                     line.set_visible(False)
@@ -140,10 +148,15 @@ class Schedule:
                 if frame_state.scene.contains_fill(fill_id):
                     fill = frame_state.scene.get_fill(fill_id)
                     if not fill.is_empty:
+                        x_values, y1_values, y2_values, where = fill.clipped_fill_data()
+                        if not np.any(where):
+                            continue
                         fills[fill_id] = ax.fill_between(
-                            fill.x,
-                            fill.y1,
-                            fill.y2,
+                            x_values,
+                            y1_values,
+                            y2_values,
+                            where=where,
+                            interpolate=True,
                             **fill.mpl_fill_kwargs(),
                         )
                         artists.append(fills[fill_id])
@@ -275,3 +288,46 @@ class Schedule:
 
         templates.update(final_scene.fills)
         return templates
+
+    def _infer_axis_limits(
+        self,
+        curve_templates: dict[str, Curve],
+        fill_templates: dict[str, FillBetweenArea],
+        *,
+        axis: str,
+    ) -> tuple[float, float]:
+        values: list[np.ndarray] = []
+
+        if axis == "x":
+            for curve in curve_templates.values():
+                extents = curve.visible_extents()
+                if extents is not None:
+                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
+            for fill in fill_templates.values():
+                extents = fill.visible_extents()
+                if extents is not None:
+                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
+        elif axis == "y":
+            for curve in curve_templates.values():
+                extents = curve.visible_extents()
+                if extents is not None:
+                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
+            for fill in fill_templates.values():
+                extents = fill.visible_extents()
+                if extents is not None:
+                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
+        else:
+            raise ValueError("axis must be 'x' or 'y'.")
+
+        if not values:
+            return (0.0, 1.0)
+
+        minimum = float(min(np.min(value) for value in values))
+        maximum = float(max(np.max(value) for value in values))
+
+        if np.isclose(minimum, maximum):
+            padding = max(abs(minimum) * 0.05, 0.5)
+            return (minimum - padding, maximum + padding)
+
+        padding = (maximum - minimum) * 0.05
+        return (minimum - padding, maximum + padding)

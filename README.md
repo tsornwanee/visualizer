@@ -19,6 +19,8 @@ Curves and fills can use arbitrary finite plot coordinates.
 - style changes for color, alpha, linewidth, and linestyle
 - transient emphasis effects like stress glow and jitter
 - support for pre-populated initial scenes
+- automatic axis fitting for arbitrary coordinate ranges
+- per-curve and per-fill clipping windows via `domain` and `value_range`
 
 ## Installation
 
@@ -109,6 +111,35 @@ Use arbitrary axis ranges when rendering:
 fig, ax = plt.subplots(figsize=(10, 6))
 anim = schedule.build_animation(fig=fig, ax=ax, xlim=(-0.2, 1.2), ylim=(-0.2, 1.2))
 ```
+
+If you omit `xlim` and `ylim`, the animation now auto-fits to the data range of the curves and fills in the schedule.
+
+Clip a curve or fill to a specific plotting window:
+
+```python
+curve = Curve(
+    "main",
+    x,
+    y,
+    color="#0f766e",
+    linewidth=3.0,
+    domain=(0.0, 1.0),
+    value_range=(0.0, 1.0),
+)
+
+fill = FillBetweenArea(
+    "main_fill",
+    x,
+    y,
+    0.0,
+    color="#99f6e4",
+    alpha=0.35,
+    domain=(0.0, 1.0),
+    value_range=(0.0, 1.0),
+)
+```
+
+For lines, geometry outside the window is hidden and the visible parts are split into separate segments. For fills, `x` is masked by `domain` and `y` values are clipped into `value_range`.
 
 ## Notebook Demo
 

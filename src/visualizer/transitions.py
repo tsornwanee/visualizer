@@ -262,6 +262,16 @@ class DrawTransition(Transition):
         if self.show_pointer:
             partial_curve = in_between_scene.get_curve(self.curve.curve_id)
             if not partial_curve.is_empty:
+                pointer_x = float(
+                    partial_curve.x[-1]
+                    if self.direction == "forward"
+                    else partial_curve.x[0]
+                )
+                pointer_y = float(
+                    partial_curve.y[-1]
+                    if self.direction == "forward"
+                    else partial_curve.y[0]
+                )
                 curve_style = self.curve.mpl_line_kwargs()
                 pointer_style = {
                     "marker": "o",
@@ -274,21 +284,14 @@ class DrawTransition(Transition):
                     "zorder": curve_style.get("zorder", 2.0) + 0.5,
                 }
                 pointer_style.update(self.pointer_kwargs)
-                pointers = (
-                    PointerOverlay(
-                        x=float(
-                            partial_curve.x[-1]
-                            if self.direction == "forward"
-                            else partial_curve.x[0]
+                if partial_curve.point_is_visible(pointer_x, pointer_y):
+                    pointers = (
+                        PointerOverlay(
+                            x=pointer_x,
+                            y=pointer_y,
+                            artist_kwargs=pointer_style,
                         ),
-                        y=float(
-                            partial_curve.y[-1]
-                            if self.direction == "forward"
-                            else partial_curve.y[0]
-                        ),
-                        artist_kwargs=pointer_style,
-                    ),
-                )
+                    )
 
         return FrameState(scene=in_between_scene, pointers=pointers)
 
@@ -795,6 +798,10 @@ class StressTransition(Transition):
         if curve.is_empty:
             return FrameState(scene=scene)
 
+        clipped_x, clipped_y = curve.clipped_line_data()
+        if clipped_x.size == 0:
+            return FrameState(scene=scene)
+
         strength = float(np.sin(np.pi * _clamp_progress(progress)))
         if strength <= 0.0:
             return FrameState(scene=scene)
@@ -818,7 +825,7 @@ class StressTransition(Transition):
 
         return FrameState(
             scene=scene,
-            glows=(GlowOverlay(x=curve.x, y=curve.y, artist_kwargs=glow_style),),
+            glows=(GlowOverlay(x=clipped_x, y=clipped_y, artist_kwargs=glow_style),),
         )
 
 
