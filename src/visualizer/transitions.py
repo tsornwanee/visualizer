@@ -104,6 +104,54 @@ def _interpolate_bounds(
     )
 
 
+def _jitter_phase_pair(seed: int) -> tuple[float, float]:
+    rng = np.random.default_rng(seed)
+    return (
+        float(rng.uniform(0.0, 2.0 * np.pi)),
+        float(rng.uniform(0.0, 2.0 * np.pi)),
+    )
+
+
+def _jitter_x_offset(
+    size: int,
+    *,
+    progress: float,
+    envelope: float,
+    amplitude: float,
+    cycles: float,
+    seed: int,
+) -> FloatArray:
+    if amplitude == 0.0:
+        return np.zeros(size, dtype=float)
+
+    oscillation = 2.0 * np.pi * cycles * progress
+    spatial = np.linspace(0.0, 2.0 * np.pi, size)
+    phase_x, _ = _jitter_phase_pair(seed)
+    return envelope * amplitude * np.sin(oscillation + 2.0 * spatial + phase_x)
+
+
+def _jitter_y_offset(
+    size: int,
+    *,
+    progress: float,
+    envelope: float,
+    amplitude: float,
+    cycles: float,
+    seed: int,
+    oscillation_scale: float,
+    spatial_scale: float,
+) -> FloatArray:
+    if amplitude == 0.0:
+        return np.zeros(size, dtype=float)
+
+    oscillation = 2.0 * np.pi * cycles * progress
+    spatial = np.linspace(0.0, 2.0 * np.pi, size)
+    _, phase_y = _jitter_phase_pair(seed)
+    return envelope * amplitude * np.sin(
+        oscillation_scale * oscillation + spatial_scale * spatial + phase_y
+    )
+
+
 @dataclass(frozen=True)
 class PointerOverlay:
     x: float
@@ -1145,19 +1193,28 @@ class Jitter(Transition):
         if curve.is_empty:
             return scene
 
-        envelope = float(np.sin(np.pi * _clamp_progress(progress)))
+        progress = _clamp_progress(progress)
+        envelope = float(np.sin(np.pi * progress))
         if envelope <= 0.0 or (self.x_amplitude == 0.0 and self.y_amplitude == 0.0):
             return scene
 
-        oscillation = 2.0 * np.pi * self.cycles * _clamp_progress(progress)
-        spatial = np.linspace(0.0, 2.0 * np.pi, curve.x.size)
-        rng = np.random.default_rng(self.seed)
-        phase_x = float(rng.uniform(0.0, 2.0 * np.pi))
-        phase_y = float(rng.uniform(0.0, 2.0 * np.pi))
-
-        x_offset = envelope * self.x_amplitude * np.sin(oscillation + 2.0 * spatial + phase_x)
-        y_offset = envelope * self.y_amplitude * np.sin(
-            1.3 * oscillation + 3.0 * spatial + phase_y
+        x_offset = _jitter_x_offset(
+            curve.x.size,
+            progress=progress,
+            envelope=envelope,
+            amplitude=self.x_amplitude,
+            cycles=self.cycles,
+            seed=self.seed,
+        )
+        y_offset = _jitter_y_offset(
+            curve.x.size,
+            progress=progress,
+            envelope=envelope,
+            amplitude=self.y_amplitude,
+            cycles=self.cycles,
+            seed=self.seed,
+            oscillation_scale=1.3,
+            spatial_scale=3.0,
         )
 
         perturbed_curve = curve.copy_with(
@@ -1223,7 +1280,8 @@ class JitterFillBetween(Transition):
         if fill.is_empty:
             return scene
 
-        envelope = float(np.sin(np.pi * _clamp_progress(progress)))
+        progress = _clamp_progress(progress)
+        envelope = float(np.sin(np.pi * progress))
         if envelope <= 0.0 or (
             self.x_amplitude == 0.0
             and self._effective_upper_y_amplitude() == 0.0
@@ -1231,29 +1289,33 @@ class JitterFillBetween(Transition):
         ):
             return scene
 
-        progress = _clamp_progress(progress)
-        upper_cycles = self._effective_upper_cycles()
-        lower_cycles = self._effective_lower_cycles()
-        upper_seed = self._effective_upper_seed()
-        lower_seed = self._effective_lower_seed()
-
-        oscillation_x = 2.0 * np.pi * ((upper_cycles + lower_cycles) * 0.5) * progress
-        oscillation_upper = 2.0 * np.pi * upper_cycles * progress
-        oscillation_lower = 2.0 * np.pi * lower_cycles * progress
-        spatial = np.linspace(0.0, 2.0 * np.pi, fill.x.size)
-        x_rng = np.random.default_rng(self.seed if self.seed is not None else upper_seed)
-        upper_rng = np.random.default_rng(upper_seed)
-        lower_rng = np.random.default_rng(lower_seed)
-        phase_x = float(x_rng.uniform(0.0, 2.0 * np.pi))
-        phase_y1 = float(upper_rng.uniform(0.0, 2.0 * np.pi))
-        phase_y2 = float(lower_rng.uniform(0.0, 2.0 * np.pi))
-
-        x_offset = envelope * self.x_amplitude * np.sin(oscillation_x + 2.0 * spatial + phase_x)
-        y1_offset = envelope * self._effective_upper_y_amplitude() * np.sin(
-            1.3 * oscillation_upper + 3.0 * spatial + phase_y1
+        x_offset = _jitter_x_offset(
+            fill.x.size,
+            progress=progress,
+            envelope=envelope,
+            amplitude=self.x_amplitude,
+            cycles=self._effective_x_cycles(),
+            seed=self._effective_x_seed(),
         )
-        y2_offset = envelope * self._effective_lower_y_amplitude() * np.sin(
-            0.9 * oscillation_lower + 2.5 * spatial + phase_y2
+        y1_offset = _jitter_y_offset(
+            fill.x.size,
+            progress=progress,
+            envelope=envelope,
+            amplitude=self._effective_upper_y_amplitude(),
+            cycles=self._effective_upper_cycles(),
+            seed=self._effective_upper_seed(),
+            oscillation_scale=1.3,
+            spatial_scale=3.0,
+        )
+        y2_offset = _jitter_y_offset(
+            fill.x.size,
+            progress=progress,
+            envelope=envelope,
+            amplitude=self._effective_lower_y_amplitude(),
+            cycles=self._effective_lower_cycles(),
+            seed=self._effective_lower_seed(),
+            oscillation_scale=0.9,
+            spatial_scale=2.5,
         )
 
         perturbed_fill = fill.copy_with(
@@ -1304,6 +1366,24 @@ class JitterFillBetween(Transition):
         if self.seed is not None:
             return int(self.seed + 1)
         return 1
+
+    def _effective_x_cycles(self) -> float:
+        if self.cycles is not None:
+            return float(self.cycles)
+        if self.upper_cycles is not None:
+            return float(self.upper_cycles)
+        if self.lower_cycles is not None:
+            return float(self.lower_cycles)
+        return 10.0
+
+    def _effective_x_seed(self) -> int:
+        if self.seed is not None:
+            return int(self.seed)
+        if self.upper_seed is not None:
+            return int(self.upper_seed)
+        if self.lower_seed is not None:
+            return int(self.lower_seed)
+        return 0
 
 
 # Backward-compatible aliases for the earlier public API.
