@@ -231,8 +231,7 @@ For lines, geometry outside the window is hidden and the visible parts are split
 
 ## Notebook Demos
 
-- [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, and combined-transition examples
-- [`notebooks/modular_scheduling.ipynb`](notebooks/modular_scheduling.ipynb): act-based scheduling with `next_act()` and `Schedule.combine(...)`
+- [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, modular scheduling, and combined-transition examples
 
 ## Publishing
 
