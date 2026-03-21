@@ -13,7 +13,7 @@ from .scene import (
     FillBetweenArea,
     FloatArray,
     Scene,
-    Theater,
+    Text,
     _clamp_progress,
     _coerce_coordinate_array,
     _coerce_matching_coordinate_array,
@@ -21,7 +21,6 @@ from .scene import (
 )
 
 Bounds = tuple[float, float]
-_UNCHANGED_THEATER = object()
 
 
 def _interpolate_float(start: float, end: float, progress: float) -> float:
@@ -70,6 +69,30 @@ def _current_fill_linewidth(fill: FillBetweenArea) -> float:
     style = fill.mpl_fill_kwargs()
     linewidth = style.get("linewidth", 1.0)
     return float(linewidth)
+
+
+def _current_text_color(text: Text) -> Any:
+    return text.mpl_text_kwargs().get("color", "#111827")
+
+
+def _current_text_alpha(text: Text) -> float:
+    style = text.mpl_text_kwargs()
+    alpha = style.get("alpha")
+    if alpha is None:
+        return 1.0
+    return float(alpha)
+
+
+def _current_text_fontsize(text: Text) -> float:
+    style = text.mpl_text_kwargs()
+    fontsize = style.get("fontsize", 12.0)
+    return float(fontsize)
+
+
+def _current_text_rotation(text: Text) -> float:
+    style = text.mpl_text_kwargs()
+    rotation = style.get("rotation", 0.0)
+    return float(rotation)
 
 
 def _validate_direction(direction: str) -> str:
@@ -219,7 +242,7 @@ class Transition(ABC):
 
 
 @dataclass(frozen=True)
-class Pause(Transition):
+class PauseTransition(Transition):
     """A timed no-op transition that keeps the current scene unchanged."""
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
@@ -230,13 +253,13 @@ class Pause(Transition):
 
 
 @dataclass(frozen=True)
-class Parallel(Transition):
+class ParallelTransition(Transition):
     transitions: tuple[Transition, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "transitions", tuple(self.transitions))
         if not self.transitions:
-            raise ValueError("Parallel requires at least one child transition.")
+            raise ValueError("ParallelTransition requires at least one child transition.")
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         return self.frame_state(scene, progress).scene
@@ -293,7 +316,7 @@ class Parallel(Transition):
 
 
 @dataclass(frozen=True)
-class Draw(Transition):
+class DrawTransition(Transition):
     curve: Curve
     show_pointer: bool = True
     pointer_kwargs: Mapping[str, Any] = field(default_factory=dict)
@@ -316,7 +339,7 @@ class Draw(Transition):
         )
         updated = dict(scene.curves)
         updated[self.curve.curve_id] = partial_curve
-        return Scene(curves=updated, fills=scene.fills, theaters=scene.theaters)
+        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.add_curve(self.curve)
@@ -344,11 +367,6 @@ class Draw(Transition):
                     if self.direction == "forward"
                     else partial_curve.y[0]
                 )
-                theater = (
-                    scene.get_theater(partial_curve.theater_id)
-                    if partial_curve.theater_id is not None
-                    else None
-                )
                 curve_style = self.curve.mpl_line_kwargs()
                 pointer_style = {
                     "marker": "o",
@@ -361,12 +379,7 @@ class Draw(Transition):
                     "zorder": curve_style.get("zorder", 2.0) + 0.5,
                 }
                 pointer_style.update(self.pointer_kwargs)
-                if partial_curve.point_is_visible(pointer_x, pointer_y, theater=theater):
-                    pointer_x, pointer_y = partial_curve.actual_point(
-                        pointer_x,
-                        pointer_y,
-                        theater=theater,
-                    )
+                if partial_curve.point_is_visible(pointer_x, pointer_y):
                     pointers = (
                         PointerOverlay(
                             x=pointer_x,
@@ -407,11 +420,11 @@ class Draw(Transition):
         )
         updated = dict(scene.curves)
         updated[self.curve.curve_id] = partial_curve
-        return Scene(curves=updated, fills=scene.fills, theaters=scene.theaters)
+        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
 
 
 @dataclass(frozen=True)
-class FillBetween(Transition):
+class FillBetweenTransition(Transition):
     fill: FillBetweenArea
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
@@ -431,7 +444,7 @@ class FillBetween(Transition):
         )
         updated = dict(scene.fills)
         updated[self.fill.fill_id] = partial_fill
-        return Scene(curves=scene.curves, fills=updated, theaters=scene.theaters)
+        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.add_fill(self.fill)
@@ -477,11 +490,11 @@ class FillBetween(Transition):
         )
         updated = dict(scene.fills)
         updated[self.fill.fill_id] = partial_fill
-        return Scene(curves=scene.curves, fills=updated, theaters=scene.theaters)
+        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
 
 
 @dataclass(frozen=True)
-class Erase(Transition):
+class EraseTransition(Transition):
     curve_id: str
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
@@ -531,11 +544,11 @@ class Erase(Transition):
             timeline_domain=effective_domain,
             direction=self.direction,
         )
-        return Scene(curves=updated, fills=scene.fills, theaters=scene.theaters)
+        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
 
 
 @dataclass(frozen=True)
-class EraseFillBetween(Transition):
+class EraseFillBetweenTransition(Transition):
     fill_id: str
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
@@ -585,15 +598,14 @@ class EraseFillBetween(Transition):
             timeline_domain=effective_domain,
             direction=self.direction,
         )
-        return Scene(curves=scene.curves, fills=updated, theaters=scene.theaters)
+        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
 
 
 @dataclass(frozen=True)
-class Move(Transition):
+class MoveTransition(Transition):
     curve_id: str
     x_prime: npt.ArrayLike | None
     y_prime: npt.ArrayLike
-    theater_id: str | None | object = _UNCHANGED_THEATER
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
@@ -664,11 +676,6 @@ class Move(Transition):
         return source_curve.copy_with(
             x=x_values,
             y=y_values,
-            theater_id=(
-                source_curve.theater_id
-                if self.theater_id is _UNCHANGED_THEATER
-                else self.theater_id
-            ),
             color=self.color,
             alpha=self.alpha,
             linestyle=self.linestyle,
@@ -710,17 +717,16 @@ class Move(Transition):
     ) -> None:
         if source_curve.x.shape != x_prime.shape or source_curve.x.shape != self.y_prime.shape:
             raise ValueError(
-                "Move requires x_prime and y_prime to match the source curve shape."
+                "MoveTransition requires x_prime and y_prime to match the source curve shape."
             )
 
 
 @dataclass(frozen=True)
-class MoveFillBetween(Transition):
+class MoveFillBetweenTransition(Transition):
     fill_id: str
     x_prime: npt.ArrayLike | None
     y1_prime: npt.ArrayLike
     y2_prime: npt.ArrayLike | float
-    theater_id: str | None | object = _UNCHANGED_THEATER
     color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
@@ -799,11 +805,6 @@ class MoveFillBetween(Transition):
             x=x_values,
             y1=y1_values,
             y2=y2_values,
-            theater_id=(
-                source_fill.theater_id
-                if self.theater_id is _UNCHANGED_THEATER
-                else self.theater_id
-            ),
             color=self.color,
             alpha=self.alpha,
             linestyle=self.linestyle,
@@ -860,12 +861,12 @@ class MoveFillBetween(Transition):
             or source_fill.x.shape != self.y2_prime.shape
         ):
             raise ValueError(
-                "MoveFillBetween requires target arrays to match the source fill shape."
+                "MoveFillBetweenTransition requires target arrays to match the source fill shape."
             )
 
 
 @dataclass(frozen=True)
-class CurveStyle(Transition):
+class CurveStyleTransition(Transition):
     curve_id: str
     color: str | None = None
     alpha: float | None = None
@@ -921,7 +922,7 @@ class CurveStyle(Transition):
 
 
 @dataclass(frozen=True)
-class FillStyle(Transition):
+class FillStyleTransition(Transition):
     fill_id: str
     color: str | None = None
     alpha: float | None = None
@@ -977,111 +978,218 @@ class FillStyle(Transition):
 
 
 @dataclass(frozen=True)
-class DrawTheater(Transition):
-    theater: Theater
+class DrawTextTransition(Transition):
+    text: Text
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
-        if scene.contains_theater(self.theater.theater_id):
-            raise ValueError(f"Theater {self.theater.theater_id!r} already exists in the scene.")
+        if scene.contains_text(self.text.text_id):
+            raise ValueError(f"Text {self.text.text_id!r} already exists in the scene.")
 
-        base_alpha = self.theater.alpha if self.theater.alpha is not None else 1.0
-        partial_theater = self.theater.copy_with(alpha=base_alpha * _clamp_progress(progress))
-        updated = dict(scene.theaters)
-        updated[self.theater.theater_id] = partial_theater
-        return Scene(curves=scene.curves, fills=scene.fills, theaters=updated)
+        t = _clamp_progress(progress)
+        target_alpha = _current_text_alpha(self.text)
+        partial_text = self.text.copy_with(alpha=_interpolate_float(0.0, target_alpha, t))
+        return scene.add_text(partial_text)
 
     def apply(self, scene: Scene) -> Scene:
-        return scene.add_theater(self.theater)
+        return scene.add_text(self.text)
 
 
 @dataclass(frozen=True)
-class MoveTheater(Transition):
-    theater_id: str
-    xlim: Bounds | None = None
-    ylim: Bounds | None = None
-    local_xlim: Bounds | None = None
-    local_ylim: Bounds | None = None
-    facecolor: str | None = None
-    edgecolor: str | None = None
+class EraseTextTransition(Transition):
+    text_id: str
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        text = scene.get_text(self.text_id)
+        t = _clamp_progress(progress)
+        updated_text = text.copy_with(alpha=_interpolate_float(_current_text_alpha(text), 0.0, t))
+        return scene.update_text(updated_text)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene.remove_text(self.text_id)
+
+
+@dataclass(frozen=True)
+class MoveTextTransition(Transition):
+    text_id: str
+    x_prime: float | None = None
+    y_prime: float | None = None
+    content: str | None = None
+    color: str | None = None
     alpha: float | None = None
-    linestyle: str | None = None
-    linewidth: float | None = None
-    patch_kwargs: Mapping[str, Any] | None = field(default=None)
+    fontsize: float | None = None
+    ha: str | None = None
+    va: str | None = None
+    rotation: float | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
+    text_kwargs: Mapping[str, Any] | None = field(default=None)
+    interpolate_color: bool = True
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "xlim", _normalize_timeline_domain(self.xlim))
-        object.__setattr__(self, "ylim", _normalize_timeline_domain(self.ylim))
-        object.__setattr__(self, "local_xlim", _normalize_timeline_domain(self.local_xlim))
-        object.__setattr__(self, "local_ylim", _normalize_timeline_domain(self.local_ylim))
+        if self.x_prime is not None and not np.isfinite(self.x_prime):
+            raise ValueError("x_prime must be finite.")
+        if self.y_prime is not None and not np.isfinite(self.y_prime):
+            raise ValueError("y_prime must be finite.")
         object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
-        if self.linewidth is not None and self.linewidth < 0:
-            raise ValueError("linewidth must be non-negative.")
-        if self.patch_kwargs is not None:
-            object.__setattr__(self, "patch_kwargs", dict(self.patch_kwargs))
+        if self.fontsize is not None and self.fontsize < 0:
+            raise ValueError("fontsize must be non-negative.")
+        if self.rotation is not None and not np.isfinite(self.rotation):
+            raise ValueError("rotation must be finite.")
+        object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
+        object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
+        if self.text_kwargs is not None:
+            object.__setattr__(self, "text_kwargs", dict(self.text_kwargs))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
-        theater = scene.get_theater(self.theater_id)
+        text = scene.get_text(self.text_id)
         t = _clamp_progress(progress)
-        return scene.update_theater(
-            theater.copy_with(
-                xlim=theater.xlim if self.xlim is None else _interpolate_bounds(theater.xlim, self.xlim, t),
-                ylim=theater.ylim if self.ylim is None else _interpolate_bounds(theater.ylim, self.ylim, t),
-                local_xlim=(
-                    theater.local_xlim
-                    if self.local_xlim is None
-                    else _interpolate_bounds(theater.local_xlim, self.local_xlim, t)
-                ),
-                local_ylim=(
-                    theater.local_ylim
-                    if self.local_ylim is None
-                    else _interpolate_bounds(theater.local_ylim, self.local_ylim, t)
-                ),
-                alpha=(
-                    theater.alpha
-                    if self.alpha is None
-                    else _interpolate_float(theater.alpha if theater.alpha is not None else 1.0, self.alpha, t)
-                ),
-                linewidth=(
-                    theater.linewidth
-                    if self.linewidth is None
-                    else _interpolate_float(theater.linewidth if theater.linewidth is not None else 1.0, self.linewidth, t)
-                ),
+
+        color = text.color
+        if self.color is not None:
+            color = (
+                _interpolate_color(_current_text_color(text), self.color, t)
+                if self.interpolate_color
+                else text.color
             )
+
+        alpha = text.alpha
+        if self.alpha is not None:
+            alpha = _interpolate_float(_current_text_alpha(text), self.alpha, t)
+
+        fontsize = text.fontsize
+        if self.fontsize is not None:
+            fontsize = _interpolate_float(_current_text_fontsize(text), self.fontsize, t)
+
+        rotation = text.rotation
+        if self.rotation is not None:
+            rotation = _interpolate_float(_current_text_rotation(text), self.rotation, t)
+
+        updated_text = text.copy_with(
+            x=_interpolate_float(text.x, self._effective_x_prime(text), t),
+            y=_interpolate_float(text.y, self._effective_y_prime(text), t),
+            color=color,
+            alpha=alpha,
+            fontsize=fontsize,
+            rotation=rotation,
+            domain=self._interpolated_domain(text, t),
+            value_range=self._interpolated_value_range(text, t),
         )
+        return scene.update_text(updated_text)
 
     def apply(self, scene: Scene) -> Scene:
-        theater = scene.get_theater(self.theater_id)
-        return scene.update_theater(
-            theater.copy_with(
-                xlim=self.xlim,
-                ylim=self.ylim,
-                local_xlim=self.local_xlim,
-                local_ylim=self.local_ylim,
-                facecolor=self.facecolor,
-                edgecolor=self.edgecolor,
-                alpha=self.alpha,
-                linestyle=self.linestyle,
-                linewidth=self.linewidth,
-                patch_kwargs=theater.patch_kwargs if self.patch_kwargs is None else self.patch_kwargs,
-            )
+        text = scene.get_text(self.text_id)
+        updated_text = text.copy_with(
+            x=self._effective_x_prime(text),
+            y=self._effective_y_prime(text),
+            content=self.content,
+            color=self.color,
+            alpha=self.alpha,
+            fontsize=self.fontsize,
+            ha=self.ha,
+            va=self.va,
+            rotation=self.rotation,
+            domain=self.domain,
+            value_range=self.value_range,
+            text_kwargs=text.text_kwargs if self.text_kwargs is None else self.text_kwargs,
         )
+        return scene.update_text(updated_text)
+
+    def _effective_x_prime(self, text: Text) -> float:
+        if self.x_prime is None:
+            return text.x
+        return float(self.x_prime)
+
+    def _effective_y_prime(self, text: Text) -> float:
+        if self.y_prime is None:
+            return text.y
+        return float(self.y_prime)
+
+    def _interpolated_domain(self, text: Text, progress: float) -> Bounds | None:
+        if self.domain is None:
+            return text.domain
+
+        start_bounds = text.domain or (text.x, text.x)
+        return _interpolate_bounds(start_bounds, self.domain, progress)
+
+    def _interpolated_value_range(self, text: Text, progress: float) -> Bounds | None:
+        if self.value_range is None:
+            return text.value_range
+
+        start_bounds = text.value_range or (text.y, text.y)
+        return _interpolate_bounds(start_bounds, self.value_range, progress)
 
 
 @dataclass(frozen=True)
-class EraseTheater(Transition):
-    theater_id: str
+class TextStyleTransition(Transition):
+    text_id: str
+    content: str | None = None
+    color: str | None = None
+    alpha: float | None = None
+    fontsize: float | None = None
+    ha: str | None = None
+    va: str | None = None
+    rotation: float | None = None
+    text_kwargs: Mapping[str, Any] | None = field(default=None)
+    interpolate_color: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        if self.fontsize is not None and self.fontsize < 0:
+            raise ValueError("fontsize must be non-negative.")
+        if self.rotation is not None and not np.isfinite(self.rotation):
+            raise ValueError("rotation must be finite.")
+        if self.text_kwargs is not None:
+            object.__setattr__(self, "text_kwargs", dict(self.text_kwargs))
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
-        theater = scene.get_theater(self.theater_id)
-        base_alpha = theater.alpha if theater.alpha is not None else 1.0
-        return scene.update_theater(theater.copy_with(alpha=base_alpha * (1.0 - _clamp_progress(progress))))
+        text = scene.get_text(self.text_id)
+        t = _clamp_progress(progress)
+
+        color = text.color
+        if self.color is not None:
+            color = (
+                _interpolate_color(_current_text_color(text), self.color, t)
+                if self.interpolate_color
+                else text.color
+            )
+
+        alpha = text.alpha
+        if self.alpha is not None:
+            alpha = _interpolate_float(_current_text_alpha(text), self.alpha, t)
+
+        fontsize = text.fontsize
+        if self.fontsize is not None:
+            fontsize = _interpolate_float(_current_text_fontsize(text), self.fontsize, t)
+
+        rotation = text.rotation
+        if self.rotation is not None:
+            rotation = _interpolate_float(_current_text_rotation(text), self.rotation, t)
+
+        updated_text = text.copy_with(
+            color=color,
+            alpha=alpha,
+            fontsize=fontsize,
+            rotation=rotation,
+        )
+        return scene.update_text(updated_text)
 
     def apply(self, scene: Scene) -> Scene:
-        return scene.remove_theater(self.theater_id)
+        text = scene.get_text(self.text_id)
+        updated_text = text.copy_with(
+            content=self.content,
+            color=self.color,
+            alpha=self.alpha,
+            fontsize=self.fontsize,
+            ha=self.ha,
+            va=self.va,
+            rotation=self.rotation,
+            text_kwargs=text.text_kwargs if self.text_kwargs is None else self.text_kwargs,
+        )
+        return scene.update_text(updated_text)
 
 
 @dataclass(frozen=True)
-class Stress(Transition):
+class StressTransition(Transition):
     curve_id: str
     glow_color: str | None = None
     glow_width: float | None = None
@@ -1127,8 +1235,7 @@ class Stress(Transition):
         if curve.is_empty:
             return FrameState(scene=scene)
 
-        theater = scene.get_theater(curve.theater_id) if curve.theater_id is not None else None
-        clipped_x, clipped_y = curve.clipped_line_data(theater)
+        clipped_x, clipped_y = curve.clipped_line_data()
         if clipped_x.size == 0:
             return FrameState(scene=scene)
 
@@ -1160,7 +1267,7 @@ class Stress(Transition):
 
 
 @dataclass(frozen=True)
-class Jitter(Transition):
+class JitterTransition(Transition):
     curve_id: str
     x_amplitude: float = 0.0
     y_amplitude: float = 0.02
@@ -1225,39 +1332,33 @@ class Jitter(Transition):
 
 
 @dataclass(frozen=True)
-class JitterFillBetween(Transition):
+class JitterFillBetweenTransition(Transition):
     fill_id: str
     x_amplitude: float = 0.0
     upper_y_amplitude: float | None = None
     lower_y_amplitude: float | None = None
+    y1_amplitude: float = 0.02
+    y2_amplitude: float = 0.0
+    cycles: float | None = None
+    seed: int | None = None
     upper_cycles: float | None = None
     lower_cycles: float | None = None
     upper_seed: int | None = None
     lower_seed: int | None = None
-    # Backward-compatible aliases from the earlier API.
-    y1_amplitude: float | None = None
-    y2_amplitude: float | None = None
-    cycles: float | None = None
-    seed: int | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.upper_y_amplitude is not None
-            and self.y1_amplitude is not None
-            and self.upper_y_amplitude != self.y1_amplitude
-        ):
-            raise ValueError("upper_y_amplitude and y1_amplitude cannot disagree.")
-        if (
-            self.lower_y_amplitude is not None
-            and self.y2_amplitude is not None
-            and self.lower_y_amplitude != self.y2_amplitude
-        ):
-            raise ValueError("lower_y_amplitude and y2_amplitude cannot disagree.")
         if self.x_amplitude < 0.0:
             raise ValueError("Jitter amplitudes must be non-negative.")
-        if self._effective_upper_y_amplitude() < 0.0 or self._effective_lower_y_amplitude() < 0.0:
+        if (
+            self._effective_upper_y_amplitude() < 0.0
+            or self._effective_lower_y_amplitude() < 0.0
+        ):
             raise ValueError("Jitter amplitudes must be non-negative.")
-        if self._effective_upper_cycles() <= 0.0 or self._effective_lower_cycles() <= 0.0:
+        if (
+            self._effective_x_cycles() <= 0.0
+            or self._effective_upper_cycles() <= 0.0
+            or self._effective_lower_cycles() <= 0.0
+        ):
             raise ValueError("cycles must be positive.")
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
@@ -1328,16 +1429,12 @@ class JitterFillBetween(Transition):
     def _effective_upper_y_amplitude(self) -> float:
         if self.upper_y_amplitude is not None:
             return float(self.upper_y_amplitude)
-        if self.y1_amplitude is not None:
-            return float(self.y1_amplitude)
-        return 0.02
+        return float(self.y1_amplitude)
 
     def _effective_lower_y_amplitude(self) -> float:
         if self.lower_y_amplitude is not None:
             return float(self.lower_y_amplitude)
-        if self.y2_amplitude is not None:
-            return float(self.y2_amplitude)
-        return 0.0
+        return float(self.y2_amplitude)
 
     def _effective_upper_cycles(self) -> float:
         if self.upper_cycles is not None:
@@ -1386,17 +1483,21 @@ class JitterFillBetween(Transition):
         return 0
 
 
-# Backward-compatible aliases for the earlier public API.
-PauseTransition = Pause
-ParallelTransition = Parallel
-DrawTransition = Draw
-FillBetweenTransition = FillBetween
-EraseTransition = Erase
-EraseFillBetweenTransition = EraseFillBetween
-MoveTransition = Move
-MoveFillBetweenTransition = MoveFillBetween
-CurveStyleTransition = CurveStyle
-FillStyleTransition = FillStyle
-StressTransition = Stress
-JitterTransition = Jitter
-JitterFillBetweenTransition = JitterFillBetween
+# Short public aliases.
+Pause = PauseTransition
+Parallel = ParallelTransition
+Draw = DrawTransition
+DrawText = DrawTextTransition
+FillBetween = FillBetweenTransition
+Erase = EraseTransition
+EraseFillBetween = EraseFillBetweenTransition
+EraseText = EraseTextTransition
+Move = MoveTransition
+MoveFillBetween = MoveFillBetweenTransition
+MoveText = MoveTextTransition
+CurveStyle = CurveStyleTransition
+FillStyle = FillStyleTransition
+TextStyle = TextStyleTransition
+Stress = StressTransition
+Jitter = JitterTransition
+JitterFillBetween = JitterFillBetweenTransition

@@ -4,23 +4,23 @@
 
 The library models animation as:
 
-- `Scene`: the persistent state of curves and filled regions
+- `Scene`: the persistent state of curves, filled regions, and text
 - `Transition`: a time-dependent change from one scene to the next
 - `Schedule`: a sequence of timed transitions compiled into a `FuncAnimation`
 
-Curves and fills can use arbitrary finite plot coordinates.
+Curves, fills, and text can use arbitrary finite plot coordinates.
 
 ## Features
 
 - draw, move, erase, and pause transitions
 - erase transitions for `fill_between` regions
 - `fill_between` creation and movement
+- text labels with draw, move, style, and erase transitions
 - concurrent transitions with `Parallel`
 - style changes for color, alpha, linewidth, and linestyle
 - transient emphasis effects like stress glow and jitter
 - support for pre-populated initial scenes
 - act-based composition via `final_scene`, `next_act()`, and `Schedule.combine(...)`
-- affine-mapped theater subspaces with clipping and optional background patches
 - automatic axis fitting for arbitrary coordinate ranges
 - per-curve and per-fill clipping windows via `domain` and `value_range`
 
@@ -114,55 +114,20 @@ full_schedule = Schedule.combine(
 
 `next_act()` starts a new schedule from the previous act's final scene, which makes it easy to debug or render each act independently. `Schedule.combine(...)` stitches those acts back into one continuous schedule later. If you want to append onto an existing schedule in place, use `extend_schedule(...)`; if you want a new combined schedule without mutating the original, use `appended(...)`.
 
-Draw into a theater and resize it:
+Add animated text labels:
 
 ```python
-from visualizer import (
-    Curve,
-    Draw,
-    DrawTheater,
-    FillBetween,
-    FillBetweenArea,
-    MoveTheater,
-    Schedule,
-    Theater,
-)
+from visualizer import DrawText, MoveText, Text
 
-panel = Theater(
-    "panel",
-    xlim=(0.15, 0.55),
-    ylim=(0.2, 0.65),
-    local_xlim=(0.0, 1.0),
-    local_ylim=(0.0, 1.0),
-    facecolor="#dbeafe",
-    edgecolor="#2563eb",
-    alpha=0.25,
-)
-
-schedule = Schedule()
-schedule.add(DrawTheater(panel), duration=0.4)
 schedule.add(
-    Draw(Curve("wave", x, y, theater_id="panel", color="#1d4ed8", linewidth=3.0)),
-    duration=1.0,
+    DrawText(Text("label", 0.2, 0.85, "Peak", color="#111827", fontsize=14)),
+    duration=0.4,
 )
 schedule.add(
-    FillBetween(
-        FillBetweenArea(
-            "wave_fill",
-            x,
-            y,
-            0.0,
-            theater_id="panel",
-            color="#93c5fd",
-            alpha=0.35,
-        )
-    ),
-    duration=1.0,
+    MoveText("label", x_prime=0.65, y_prime=0.55, color="#dc2626", rotation=-12),
+    duration=0.8,
 )
-schedule.add(MoveTheater("panel", xlim=(0.05, 0.85), ylim=(0.15, 0.85)), duration=1.0)
 ```
-
-The theater maps local coordinates into an actual rectangle with a linear transform. Curves and fills assigned to `theater_id="panel"` are clipped to the theater border automatically.
 
 Jitter a curve and its fill together:
 
@@ -188,8 +153,6 @@ schedule.add(
 )
 ```
 
-For `JitterFillBetween`, the upper and lower boundaries can now use different amplitudes, cycles, and seeds. Horizontal jitter is still shared because `fill_between` uses one common `x` grid.
-
 Use arbitrary axis ranges when rendering:
 
 ```python
@@ -197,7 +160,7 @@ fig, ax = plt.subplots(figsize=(10, 6))
 anim = schedule.build_animation(fig=fig, ax=ax, xlim=(-0.2, 1.2), ylim=(-0.2, 1.2))
 ```
 
-If you omit `xlim` and `ylim`, the animation now auto-fits to the data range of the curves and fills in the schedule.
+If you omit `xlim` and `ylim`, the animation now auto-fits to the data range of the curves, fills, and text anchors in the schedule.
 
 Clip a curve or fill to a specific plotting window:
 
@@ -230,7 +193,6 @@ For lines, geometry outside the window is hidden and the visible parts are split
 
 - [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, and combined-transition examples
 - [`notebooks/modular_scheduling.ipynb`](notebooks/modular_scheduling.ipynb): act-based scheduling with `next_act()` and `Schedule.combine(...)`
-- [`notebooks/theater_demo.ipynb`](notebooks/theater_demo.ipynb): theater layout, clipping, and linear resizing examples
 
 ## Versioning
 
