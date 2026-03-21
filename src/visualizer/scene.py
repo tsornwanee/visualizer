@@ -9,6 +9,7 @@ import numpy.typing as npt
 
 FloatArray = npt.NDArray[np.float64]
 Bounds = tuple[float, float]
+_UNSET = object()
 
 
 def _coerce_coordinate_array(values: npt.ArrayLike, name: str) -> FloatArray:
@@ -74,6 +75,25 @@ def _normalize_bounds(bounds: Bounds | None, name: str) -> Bounds | None:
         start, end = end, start
 
     return (start, end)
+
+
+def _intersect_bounds(primary: Bounds | None, secondary: Bounds | None) -> Bounds | None:
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+
+    start = max(primary[0], secondary[0])
+    end = min(primary[1], secondary[1])
+    if start > end:
+        return None
+    return (start, end)
+
+
+def _bounds_overlap(primary: Bounds | None, secondary: Bounds | None) -> bool:
+    if primary is None or secondary is None:
+        return True
+    return not (primary[1] < secondary[0] or secondary[1] < primary[0])
 
 
 def _point_is_visible(
@@ -245,6 +265,122 @@ def _merge_style_kwargs(
     return kwargs
 
 
+def _transform_array(values: FloatArray, source: Bounds, target: Bounds) -> FloatArray:
+    transformed = values.copy()
+    visible_mask = ~np.isnan(values)
+    if not np.any(visible_mask):
+        return transformed
+
+    source_width = source[1] - source[0]
+    if np.isclose(source_width, 0.0):
+        raise ValueError("Cannot transform through a zero-width source interval.")
+
+    transformed[visible_mask] = target[0] + (
+        (values[visible_mask] - source[0]) * (target[1] - target[0]) / source_width
+    )
+    return transformed
+
+
+@dataclass(frozen=True)
+class Theater:
+    """A rectangular affine-mapped subspace for curves and fills."""
+
+    theater_id: str
+    xlim: Bounds
+    ylim: Bounds
+    local_xlim: Bounds = (0.0, 1.0)
+    local_ylim: Bounds = (0.0, 1.0)
+    facecolor: str | None = None
+    edgecolor: str | None = None
+    alpha: float | None = None
+    linestyle: str | None = None
+    linewidth: float | None = None
+    patch_kwargs: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "xlim", _normalize_bounds(self.xlim, "xlim"))
+        object.__setattr__(self, "ylim", _normalize_bounds(self.ylim, "ylim"))
+        object.__setattr__(self, "local_xlim", _normalize_bounds(self.local_xlim, "local_xlim"))
+        object.__setattr__(self, "local_ylim", _normalize_bounds(self.local_ylim, "local_ylim"))
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "patch_kwargs", dict(self.patch_kwargs))
+
+        if self.linewidth is not None and self.linewidth < 0:
+            raise ValueError("linewidth must be non-negative.")
+        if np.isclose(self.xlim[0], self.xlim[1]) or np.isclose(self.ylim[0], self.ylim[1]):
+            raise ValueError("Theater actual bounds must have non-zero width and height.")
+        if np.isclose(self.local_xlim[0], self.local_xlim[1]) or np.isclose(
+            self.local_ylim[0], self.local_ylim[1]
+        ):
+            raise ValueError("Theater local bounds must have non-zero width and height.")
+
+    def mpl_patch_kwargs(self) -> dict[str, Any]:
+        kwargs = dict(self.patch_kwargs)
+        if self.facecolor is not None:
+            kwargs["facecolor"] = self.facecolor
+        if self.edgecolor is not None:
+            kwargs["edgecolor"] = self.edgecolor
+        if self.alpha is not None:
+            kwargs["alpha"] = self.alpha
+        if self.linestyle is not None:
+            kwargs["linestyle"] = self.linestyle
+        if self.linewidth is not None:
+            kwargs["linewidth"] = self.linewidth
+        return kwargs
+
+    def copy_with(
+        self,
+        *,
+        xlim: Bounds | None = None,
+        ylim: Bounds | None = None,
+        local_xlim: Bounds | None = None,
+        local_ylim: Bounds | None = None,
+        facecolor: str | None = None,
+        edgecolor: str | None = None,
+        alpha: float | None = None,
+        linestyle: str | None = None,
+        linewidth: float | None = None,
+        patch_kwargs: Mapping[str, Any] | None = None,
+    ) -> Theater:
+        return Theater(
+            theater_id=self.theater_id,
+            xlim=self.xlim if xlim is None else xlim,
+            ylim=self.ylim if ylim is None else ylim,
+            local_xlim=self.local_xlim if local_xlim is None else local_xlim,
+            local_ylim=self.local_ylim if local_ylim is None else local_ylim,
+            facecolor=self.facecolor if facecolor is None else facecolor,
+            edgecolor=self.edgecolor if edgecolor is None else edgecolor,
+            alpha=self.alpha if alpha is None else alpha,
+            linestyle=self.linestyle if linestyle is None else linestyle,
+            linewidth=self.linewidth if linewidth is None else linewidth,
+            patch_kwargs=self.patch_kwargs if patch_kwargs is None else patch_kwargs,
+        )
+
+    @property
+    def width(self) -> float:
+        return float(self.xlim[1] - self.xlim[0])
+
+    @property
+    def height(self) -> float:
+        return float(self.ylim[1] - self.ylim[0])
+
+    def transform_x(self, x_values: FloatArray) -> FloatArray:
+        return _transform_array(np.asarray(x_values, dtype=float), self.local_xlim, self.xlim)
+
+    def transform_y(self, y_values: FloatArray) -> FloatArray:
+        return _transform_array(np.asarray(y_values, dtype=float), self.local_ylim, self.ylim)
+
+    def transform_points(
+        self,
+        x_values: FloatArray,
+        y_values: FloatArray,
+    ) -> tuple[FloatArray, FloatArray]:
+        return self.transform_x(x_values), self.transform_y(y_values)
+
+    def visible_extents(self) -> tuple[float, float, float, float]:
+        return (self.xlim[0], self.xlim[1], self.ylim[0], self.ylim[1])
+
+
 @dataclass(frozen=True)
 class Curve:
     """A single curve in plot coordinates."""
@@ -258,6 +394,7 @@ class Curve:
     linewidth: float | None = None
     domain: Bounds | None = None
     value_range: Bounds | None = None
+    theater_id: str | None = None
     line_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -298,6 +435,7 @@ class Curve:
         linewidth: float | None = None,
         domain: Bounds | None = None,
         value_range: Bounds | None = None,
+        theater_id: str | None | object = _UNSET,
         line_kwargs: Mapping[str, Any] | None = None,
     ) -> Curve:
         return Curve(
@@ -310,27 +448,46 @@ class Curve:
             linewidth=self.linewidth if linewidth is None else linewidth,
             domain=self.domain if domain is None else domain,
             value_range=self.value_range if value_range is None else value_range,
+            theater_id=self.theater_id if theater_id is _UNSET else theater_id,
             line_kwargs=self.line_kwargs if line_kwargs is None else line_kwargs,
         )
 
-    def clipped_line_data(self) -> tuple[FloatArray, FloatArray]:
-        return _clip_polyline_to_window(
+    def clipped_line_data(
+        self,
+        theater: Theater | None = None,
+    ) -> tuple[FloatArray, FloatArray]:
+        if not self._has_visible_window(theater):
+            return (
+                np.asarray([], dtype=float),
+                np.asarray([], dtype=float),
+            )
+        clipped_x, clipped_y = _clip_polyline_to_window(
             self.x,
             self.y,
-            domain=self.domain,
-            value_range=self.value_range,
+            domain=self._effective_domain(theater),
+            value_range=self._effective_value_range(theater),
         )
+        if theater is None or clipped_x.size == 0:
+            return clipped_x, clipped_y
+        return theater.transform_points(clipped_x, clipped_y)
 
-    def point_is_visible(self, x_value: float, y_value: float) -> bool:
+    def point_is_visible(
+        self,
+        x_value: float,
+        y_value: float,
+        theater: Theater | None = None,
+    ) -> bool:
+        if not self._has_visible_window(theater):
+            return False
         return _point_is_visible(
             x_value,
             y_value,
-            domain=self.domain,
-            value_range=self.value_range,
+            domain=self._effective_domain(theater),
+            value_range=self._effective_value_range(theater),
         )
 
-    def visible_extents(self) -> tuple[float, float, float, float] | None:
-        clipped_x, clipped_y = self.clipped_line_data()
+    def visible_extents(self, theater: Theater | None = None) -> tuple[float, float, float, float] | None:
+        clipped_x, clipped_y = self.clipped_line_data(theater)
         if clipped_x.size == 0:
             return None
 
@@ -346,6 +503,21 @@ class Curve:
             float(np.min(visible_y)),
             float(np.max(visible_y)),
         )
+
+    def actual_point(
+        self,
+        x_value: float,
+        y_value: float,
+        theater: Theater | None = None,
+    ) -> tuple[float, float]:
+        if theater is None:
+            return (float(x_value), float(y_value))
+
+        x_array, y_array = theater.transform_points(
+            np.asarray([x_value], dtype=float),
+            np.asarray([y_value], dtype=float),
+        )
+        return (float(x_array[0]), float(y_array[0]))
 
     def reveal_until(self, progress: float) -> Curve:
         """Reveal points from left to right based on normalized progress."""
@@ -407,6 +579,24 @@ class Curve:
                 raise ValueError("direction must be 'forward' or 'backward'.")
         return self.copy_with(x=self.x[mask], y=self.y[mask])
 
+    def _effective_domain(self, theater: Theater | None) -> Bounds | None:
+        if theater is None:
+            return self.domain
+        return _intersect_bounds(self.domain, theater.local_xlim)
+
+    def _effective_value_range(self, theater: Theater | None) -> Bounds | None:
+        if theater is None:
+            return self.value_range
+        return _intersect_bounds(self.value_range, theater.local_ylim)
+
+    def _has_visible_window(self, theater: Theater | None) -> bool:
+        if theater is None:
+            return True
+        return _bounds_overlap(self.domain, theater.local_xlim) and _bounds_overlap(
+            self.value_range,
+            theater.local_ylim,
+        )
+
 
 @dataclass(frozen=True)
 class FillBetweenArea:
@@ -422,6 +612,7 @@ class FillBetweenArea:
     linewidth: float | None = None
     domain: Bounds | None = None
     value_range: Bounds | None = None
+    theater_id: str | None = None
     fill_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -466,6 +657,7 @@ class FillBetweenArea:
         linewidth: float | None = None,
         domain: Bounds | None = None,
         value_range: Bounds | None = None,
+        theater_id: str | None | object = _UNSET,
         fill_kwargs: Mapping[str, Any] | None = None,
     ) -> FillBetweenArea:
         return FillBetweenArea(
@@ -479,34 +671,50 @@ class FillBetweenArea:
             linewidth=self.linewidth if linewidth is None else linewidth,
             domain=self.domain if domain is None else domain,
             value_range=self.value_range if value_range is None else value_range,
+            theater_id=self.theater_id if theater_id is _UNSET else theater_id,
             fill_kwargs=self.fill_kwargs if fill_kwargs is None else fill_kwargs,
         )
 
-    def clipped_fill_data(self) -> tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]]:
+    def clipped_fill_data(
+        self,
+        theater: Theater | None = None,
+    ) -> tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]]:
         if self.is_empty:
+            empty = np.asarray([], dtype=float)
+            return empty, empty, empty, np.asarray([], dtype=bool)
+        if not self._has_visible_window(theater):
             empty = np.asarray([], dtype=float)
             return empty, empty, empty, np.asarray([], dtype=bool)
 
         where = np.ones(self.x.shape, dtype=bool)
-        if self.domain is not None:
-            where &= (self.x >= self.domain[0]) & (self.x <= self.domain[1])
+        effective_domain = self._effective_domain(theater)
+        effective_value_range = self._effective_value_range(theater)
+        if effective_domain is not None:
+            where &= (self.x >= effective_domain[0]) & (self.x <= effective_domain[1])
 
         clipped_y1 = self.y1.copy()
         clipped_y2 = self.y2.copy()
-        if self.value_range is not None:
-            clipped_y1 = np.clip(clipped_y1, self.value_range[0], self.value_range[1])
-            clipped_y2 = np.clip(clipped_y2, self.value_range[0], self.value_range[1])
+        if effective_value_range is not None:
+            clipped_y1 = np.clip(clipped_y1, effective_value_range[0], effective_value_range[1])
+            clipped_y2 = np.clip(clipped_y2, effective_value_range[0], effective_value_range[1])
 
-        return self.x.copy(), clipped_y1, clipped_y2, where
+        clipped_x = self.x.copy()
+        if theater is not None:
+            clipped_x = theater.transform_x(clipped_x)
+            clipped_y1 = theater.transform_y(clipped_y1)
+            clipped_y2 = theater.transform_y(clipped_y2)
 
-    def visible_extents(self) -> tuple[float, float, float, float] | None:
+        return clipped_x, clipped_y1, clipped_y2, where
+
+    def visible_extents(self, theater: Theater | None = None) -> tuple[float, float, float, float] | None:
         if self.is_empty:
             return None
 
-        x_values, y1_values, y2_values, where = self.clipped_fill_data()
-        if self.domain is not None:
-            x_min = max(float(np.min(self.x)), self.domain[0])
-            x_max = min(float(np.max(self.x)), self.domain[1])
+        x_values, y1_values, y2_values, where = self.clipped_fill_data(theater)
+        effective_domain = self._effective_domain(theater)
+        if effective_domain is not None and theater is None:
+            x_min = max(float(np.min(self.x)), effective_domain[0])
+            x_max = min(float(np.max(self.x)), effective_domain[1])
             if x_min > x_max:
                 return None
         else:
@@ -525,6 +733,24 @@ class FillBetweenArea:
             x_max,
             float(np.min(visible_y)),
             float(np.max(visible_y)),
+        )
+
+    def _effective_domain(self, theater: Theater | None) -> Bounds | None:
+        if theater is None:
+            return self.domain
+        return _intersect_bounds(self.domain, theater.local_xlim)
+
+    def _effective_value_range(self, theater: Theater | None) -> Bounds | None:
+        if theater is None:
+            return self.value_range
+        return _intersect_bounds(self.value_range, theater.local_ylim)
+
+    def _has_visible_window(self, theater: Theater | None) -> bool:
+        if theater is None:
+            return True
+        return _bounds_overlap(self.domain, theater.local_xlim) and _bounds_overlap(
+            self.value_range,
+            theater.local_ylim,
         )
 
     def reveal_until(self, progress: float) -> FillBetweenArea:
@@ -590,26 +816,38 @@ class Scene:
 
     curves: Mapping[str, Curve] = field(default_factory=dict)
     fills: Mapping[str, FillBetweenArea] = field(default_factory=dict)
+    theaters: Mapping[str, Theater] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         normalized_curves: dict[str, Curve] = {}
         normalized_fills: dict[str, FillBetweenArea] = {}
+        normalized_theaters: dict[str, Theater] = {}
+
+        for theater_id, theater in dict(self.theaters).items():
+            if theater_id != theater.theater_id:
+                raise ValueError("Scene theater keys must match each theater's theater_id.")
+            normalized_theaters[theater_id] = theater
 
         for curve_id, curve in dict(self.curves).items():
             if curve_id != curve.curve_id:
                 raise ValueError("Scene curve keys must match each curve's curve_id.")
+            if curve.theater_id is not None and curve.theater_id not in normalized_theaters:
+                raise ValueError(f"Curve {curve.curve_id!r} references missing theater {curve.theater_id!r}.")
             normalized_curves[curve_id] = curve
 
         for fill_id, fill in dict(self.fills).items():
             if fill_id != fill.fill_id:
                 raise ValueError("Scene fill keys must match each fill's fill_id.")
+            if fill.theater_id is not None and fill.theater_id not in normalized_theaters:
+                raise ValueError(f"Fill {fill.fill_id!r} references missing theater {fill.theater_id!r}.")
             normalized_fills[fill_id] = fill
 
         object.__setattr__(self, "curves", normalized_curves)
         object.__setattr__(self, "fills", normalized_fills)
+        object.__setattr__(self, "theaters", normalized_theaters)
 
     def __len__(self) -> int:
-        return len(self.curves) + len(self.fills)
+        return len(self.curves) + len(self.fills) + len(self.theaters)
 
     def contains(self, curve_id: str) -> bool:
         return self.contains_curve(curve_id)
@@ -619,6 +857,9 @@ class Scene:
 
     def contains_fill(self, fill_id: str) -> bool:
         return fill_id in self.fills
+
+    def contains_theater(self, theater_id: str) -> bool:
+        return theater_id in self.theaters
 
     def get_curve(self, curve_id: str) -> Curve:
         try:
@@ -632,13 +873,19 @@ class Scene:
         except KeyError as exc:
             raise KeyError(f"Fill {fill_id!r} does not exist in the scene.") from exc
 
+    def get_theater(self, theater_id: str) -> Theater:
+        try:
+            return self.theaters[theater_id]
+        except KeyError as exc:
+            raise KeyError(f"Theater {theater_id!r} does not exist in the scene.") from exc
+
     def add_curve(self, curve: Curve) -> Scene:
         if self.contains_curve(curve.curve_id):
             raise ValueError(f"Curve {curve.curve_id!r} already exists in the scene.")
 
         updated = dict(self.curves)
         updated[curve.curve_id] = curve
-        return Scene(curves=updated, fills=self.fills)
+        return Scene(curves=updated, fills=self.fills, theaters=self.theaters)
 
     def update_curve(self, curve: Curve) -> Scene:
         if not self.contains_curve(curve.curve_id):
@@ -646,7 +893,7 @@ class Scene:
 
         updated = dict(self.curves)
         updated[curve.curve_id] = curve
-        return Scene(curves=updated, fills=self.fills)
+        return Scene(curves=updated, fills=self.fills, theaters=self.theaters)
 
     def remove_curve(self, curve_id: str) -> Scene:
         if not self.contains_curve(curve_id):
@@ -654,7 +901,7 @@ class Scene:
 
         updated = dict(self.curves)
         updated.pop(curve_id)
-        return Scene(curves=updated, fills=self.fills)
+        return Scene(curves=updated, fills=self.fills, theaters=self.theaters)
 
     def add_fill(self, fill: FillBetweenArea) -> Scene:
         if self.contains_fill(fill.fill_id):
@@ -662,7 +909,7 @@ class Scene:
 
         updated = dict(self.fills)
         updated[fill.fill_id] = fill
-        return Scene(curves=self.curves, fills=updated)
+        return Scene(curves=self.curves, fills=updated, theaters=self.theaters)
 
     def update_fill(self, fill: FillBetweenArea) -> Scene:
         if not self.contains_fill(fill.fill_id):
@@ -670,7 +917,7 @@ class Scene:
 
         updated = dict(self.fills)
         updated[fill.fill_id] = fill
-        return Scene(curves=self.curves, fills=updated)
+        return Scene(curves=self.curves, fills=updated, theaters=self.theaters)
 
     def remove_fill(self, fill_id: str) -> Scene:
         if not self.contains_fill(fill_id):
@@ -678,4 +925,32 @@ class Scene:
 
         updated = dict(self.fills)
         updated.pop(fill_id)
-        return Scene(curves=self.curves, fills=updated)
+        return Scene(curves=self.curves, fills=updated, theaters=self.theaters)
+
+    def add_theater(self, theater: Theater) -> Scene:
+        if self.contains_theater(theater.theater_id):
+            raise ValueError(f"Theater {theater.theater_id!r} already exists in the scene.")
+
+        updated = dict(self.theaters)
+        updated[theater.theater_id] = theater
+        return Scene(curves=self.curves, fills=self.fills, theaters=updated)
+
+    def update_theater(self, theater: Theater) -> Scene:
+        if not self.contains_theater(theater.theater_id):
+            raise ValueError(f"Theater {theater.theater_id!r} does not exist in the scene.")
+
+        updated = dict(self.theaters)
+        updated[theater.theater_id] = theater
+        return Scene(curves=self.curves, fills=self.fills, theaters=updated)
+
+    def remove_theater(self, theater_id: str) -> Scene:
+        if not self.contains_theater(theater_id):
+            raise ValueError(f"Theater {theater_id!r} does not exist in the scene.")
+        if any(curve.theater_id == theater_id for curve in self.curves.values()):
+            raise ValueError(f"Cannot remove theater {theater_id!r} while a curve still references it.")
+        if any(fill.theater_id == theater_id for fill in self.fills.values()):
+            raise ValueError(f"Cannot remove theater {theater_id!r} while a fill still references it.")
+
+        updated = dict(self.theaters)
+        updated.pop(theater_id)
+        return Scene(curves=self.curves, fills=self.fills, theaters=updated)

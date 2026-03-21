@@ -15,11 +15,12 @@ Curves and fills can use arbitrary finite plot coordinates.
 - draw, move, erase, and pause transitions
 - erase transitions for `fill_between` regions
 - `fill_between` creation and movement
-- concurrent transitions with `ParallelTransition`
+- concurrent transitions with `Parallel`
 - style changes for color, alpha, linewidth, and linestyle
 - transient emphasis effects like stress glow and jitter
 - support for pre-populated initial scenes
 - act-based composition via `final_scene`, `next_act()`, and `Schedule.combine(...)`
+- affine-mapped theater subspaces with clipping and optional background patches
 - automatic axis fitting for arbitrary coordinate ranges
 - per-curve and per-fill clipping windows via `domain` and `value_range`
 
@@ -35,10 +36,10 @@ pip install -e .
 import numpy as np
 from visualizer import (
     Curve,
-    DrawTransition,
+    Draw,
     FillBetweenArea,
-    FillBetweenTransition,
-    ParallelTransition,
+    FillBetween,
+    Parallel,
     Schedule,
 )
 
@@ -47,10 +48,10 @@ y = np.abs(np.sin(x))
 
 schedule = Schedule()
 schedule.add(
-    ParallelTransition(
+    Parallel(
         (
-            DrawTransition(Curve("wave", x, y, color="#0f766e", linewidth=3.0)),
-            FillBetweenTransition(
+            Draw(Curve("wave", x, y, color="#0f766e", linewidth=3.0)),
+            FillBetween(
                 FillBetweenArea(
                     "wave_fill",
                     x,
@@ -93,17 +94,17 @@ schedule.pause(0.75)
 Build animation in modular acts:
 
 ```python
-from visualizer import Curve, DrawTransition, EraseTransition, MoveTransition, Schedule
+from visualizer import Curve, Draw, Erase, Move, Schedule
 
 act_1 = Schedule()
-act_1.add(DrawTransition(Curve("u", x, y, color="#dc2626", linewidth=3.0)), duration=1.5)
+act_1.add(Draw(Curve("u", x, y, color="#dc2626", linewidth=3.0)), duration=1.5)
 
 act_2 = act_1.next_act()
 act_2.add_break(0.5)
-act_2.add(MoveTransition("u", x_prime=None, y_prime=y_prime), duration=1.25)
+act_2.add(Move("u", x_prime=None, y_prime=y_prime), duration=1.25)
 
 act_3 = act_2.next_act()
-act_3.add(EraseTransition("u"), duration=1.0)
+act_3.add(Erase("u"), duration=1.0)
 
 full_schedule = Schedule.combine(
     [act_1, act_2, act_3],
@@ -113,21 +114,81 @@ full_schedule = Schedule.combine(
 
 `next_act()` starts a new schedule from the previous act's final scene, which makes it easy to debug or render each act independently. `Schedule.combine(...)` stitches those acts back into one continuous schedule later. If you want to append onto an existing schedule in place, use `extend_schedule(...)`; if you want a new combined schedule without mutating the original, use `appended(...)`.
 
+Draw into a theater and resize it:
+
+```python
+from visualizer import (
+    Curve,
+    Draw,
+    DrawTheater,
+    FillBetween,
+    FillBetweenArea,
+    MoveTheater,
+    Schedule,
+    Theater,
+)
+
+panel = Theater(
+    "panel",
+    xlim=(0.15, 0.55),
+    ylim=(0.2, 0.65),
+    local_xlim=(0.0, 1.0),
+    local_ylim=(0.0, 1.0),
+    facecolor="#dbeafe",
+    edgecolor="#2563eb",
+    alpha=0.25,
+)
+
+schedule = Schedule()
+schedule.add(DrawTheater(panel), duration=0.4)
+schedule.add(
+    Draw(Curve("wave", x, y, theater_id="panel", color="#1d4ed8", linewidth=3.0)),
+    duration=1.0,
+)
+schedule.add(
+    FillBetween(
+        FillBetweenArea(
+            "wave_fill",
+            x,
+            y,
+            0.0,
+            theater_id="panel",
+            color="#93c5fd",
+            alpha=0.35,
+        )
+    ),
+    duration=1.0,
+)
+schedule.add(MoveTheater("panel", xlim=(0.05, 0.85), ylim=(0.15, 0.85)), duration=1.0)
+```
+
+The theater maps local coordinates into an actual rectangle with a linear transform. Curves and fills assigned to `theater_id="panel"` are clipped to the theater border automatically.
+
 Jitter a curve and its fill together:
 
 ```python
-from visualizer import JitterFillBetweenTransition, JitterTransition, ParallelTransition
+from visualizer import Jitter, JitterFillBetween, Parallel
 
 schedule.add(
-    ParallelTransition(
+    Parallel(
         (
-            JitterTransition("wave", y_amplitude=0.03, cycles=10.0, seed=7),
-            JitterFillBetweenTransition("wave_fill", y1_amplitude=0.03, cycles=10.0, seed=7),
+            Jitter("wave", y_amplitude=0.03, cycles=10.0, seed=7),
+            JitterFillBetween(
+                "wave_fill",
+                upper_y_amplitude=0.03,
+                lower_y_amplitude=0.01,
+                upper_cycles=10.0,
+                lower_cycles=7.0,
+                upper_seed=7,
+                lower_seed=21,
+            ),
         )
     ),
     duration=0.8,
 )
 ```
+
+For `JitterFillBetween`, the upper and lower boundaries can now use different amplitudes, cycles, and seeds. Horizontal jitter is still shared because `fill_between` uses one common `x` grid.
 
 Use arbitrary axis ranges when rendering:
 
@@ -165,9 +226,11 @@ fill = FillBetweenArea(
 
 For lines, geometry outside the window is hidden and the visible parts are split into separate segments. For fills, `x` is masked by `domain` and `y` values are clipped into `value_range`.
 
-## Notebook Demo
+## Notebook Demos
 
-See [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb) for direct, cell-by-cell examples of the API.
+- [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, and combined-transition examples
+- [`notebooks/modular_scheduling.ipynb`](notebooks/modular_scheduling.ipynb): act-based scheduling with `next_act()` and `Schedule.combine(...)`
+- [`notebooks/theater_demo.ipynb`](notebooks/theater_demo.ipynb): theater layout, clipping, and linear resizing examples
 
 ## Versioning
 

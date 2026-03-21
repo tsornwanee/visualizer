@@ -11,9 +11,10 @@ from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 
-from .scene import Curve, FillBetweenArea, Scene
-from .transitions import FrameState, PauseTransition, Transition
+from .scene import Curve, FillBetweenArea, Scene, Theater
+from .transitions import FrameState, Pause, Transition
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class Schedule:
         return self
 
     def add_break(self, duration: float) -> Schedule:
-        self.entries.append(ScheduledTransition(transition=PauseTransition(), duration=duration))
+        self.entries.append(ScheduledTransition(transition=Pause(), duration=duration))
         return self
 
     def pause(self, duration: float) -> Schedule:
@@ -156,6 +157,7 @@ class Schedule:
         final_scene = prepared[-1].end_scene if prepared else self.initial_scene
         curve_templates = self._collect_curve_templates(prepared, final_scene)
         fill_templates = self._collect_fill_templates(prepared, final_scene)
+        theater_templates = self._collect_theater_templates(prepared, final_scene)
 
         if ax is None and fig is None:
             fig, ax = plt.subplots()
@@ -167,13 +169,26 @@ class Schedule:
         assert fig is not None
         assert ax is not None
 
-        resolved_xlim = xlim or self._infer_axis_limits(curve_templates, fill_templates, axis="x")
-        resolved_ylim = ylim or self._infer_axis_limits(curve_templates, fill_templates, axis="y")
+        resolved_xlim = xlim or self._infer_axis_limits(prepared, final_scene, axis="x")
+        resolved_ylim = ylim or self._infer_axis_limits(prepared, final_scene, axis="y")
 
         ax.set_xlim(*resolved_xlim)
         ax.set_ylim(*resolved_ylim)
         if title is not None:
             ax.set_title(title)
+
+        theater_patches: dict[str, Rectangle] = {}
+        for theater_id, theater in theater_templates.items():
+            patch = Rectangle(
+                (theater.xlim[0], theater.ylim[0]),
+                theater.width,
+                theater.height,
+                visible=False,
+                **theater.mpl_patch_kwargs(),
+            )
+            patch.set_label(theater_id)
+            ax.add_patch(patch)
+            theater_patches[theater_id] = patch
 
         lines: dict[str, Line2D] = {}
         for curve_id, curve in curve_templates.items():
@@ -189,24 +204,49 @@ class Schedule:
         def render_frame(frame_state: FrameState) -> list[Artist]:
             artists: list[Artist] = []
 
+            for theater_id, patch in theater_patches.items():
+                if frame_state.scene.contains_theater(theater_id):
+                    theater = frame_state.scene.get_theater(theater_id)
+                    patch.set_xy((theater.xlim[0], theater.ylim[0]))
+                    patch.set_width(theater.width)
+                    patch.set_height(theater.height)
+                    patch.set(**theater.mpl_patch_kwargs())
+                    patch.set_visible(True)
+                else:
+                    patch.set_visible(False)
+                artists.append(patch)
+
             for curve_id, line in lines.items():
                 if frame_state.scene.contains_curve(curve_id):
                     curve = frame_state.scene.get_curve(curve_id)
+                    theater = (
+                        frame_state.scene.get_theater(curve.theater_id)
+                        if curve.theater_id is not None
+                        else None
+                    )
                     if curve.is_empty:
                         line.set_data([], [])
                         line.set_visible(False)
+                        line.set_clip_path(None)
                     else:
-                        clipped_x, clipped_y = curve.clipped_line_data()
+                        clipped_x, clipped_y = curve.clipped_line_data(theater)
                         if clipped_x.size == 0:
                             line.set_data([], [])
                             line.set_visible(False)
+                            line.set_clip_path(None)
                         else:
                             line.set_data(clipped_x, clipped_y)
                             line.set(**curve.mpl_line_kwargs())
+                            line.set_clip_path(
+                                theater_patches[curve.theater_id]
+                                if curve.theater_id is not None
+                                else None
+                            )
                             line.set_visible(True)
                 else:
                     line.set_data([], [])
                     line.set_visible(False)
+                    line.set_clip_path(None)
                 artists.append(line)
 
             for fill_id, collection in fills.items():
@@ -216,8 +256,13 @@ class Schedule:
 
                 if frame_state.scene.contains_fill(fill_id):
                     fill = frame_state.scene.get_fill(fill_id)
+                    theater = (
+                        frame_state.scene.get_theater(fill.theater_id)
+                        if fill.theater_id is not None
+                        else None
+                    )
                     if not fill.is_empty:
-                        x_values, y1_values, y2_values, where = fill.clipped_fill_data()
+                        x_values, y1_values, y2_values, where = fill.clipped_fill_data(theater)
                         if not np.any(where):
                             continue
                         fills[fill_id] = ax.fill_between(
@@ -228,6 +273,8 @@ class Schedule:
                             interpolate=True,
                             **fill.mpl_fill_kwargs(),
                         )
+                        if fill.theater_id is not None:
+                            fills[fill_id].set_clip_path(theater_patches[fill.theater_id])
                         artists.append(fills[fill_id])
 
             while pointer_artists:
@@ -358,35 +405,62 @@ class Schedule:
         templates.update(final_scene.fills)
         return templates
 
+    def _collect_theater_templates(
+        self,
+        prepared: list[_PreparedTransition],
+        final_scene: Scene,
+    ) -> dict[str, Theater]:
+        templates: dict[str, Theater] = dict(self.initial_scene.theaters)
+
+        for item in prepared:
+            templates.update(item.start_scene.theaters)
+            templates.update(item.end_scene.theaters)
+
+        templates.update(final_scene.theaters)
+        return templates
+
     def _infer_axis_limits(
         self,
-        curve_templates: dict[str, Curve],
-        fill_templates: dict[str, FillBetweenArea],
+        prepared: list[_PreparedTransition],
+        final_scene: Scene,
         *,
         axis: str,
     ) -> tuple[float, float]:
         values: list[np.ndarray] = []
 
-        if axis == "x":
-            for curve in curve_templates.values():
-                extents = curve.visible_extents()
-                if extents is not None:
+        for scene in self._scenes_for_limits(prepared, final_scene):
+            for theater in scene.theaters.values():
+                extents = theater.visible_extents()
+                if axis == "x":
                     values.append(np.asarray([extents[0], extents[1]], dtype=float))
-            for fill in fill_templates.values():
-                extents = fill.visible_extents()
-                if extents is not None:
+                elif axis == "y":
+                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
+                else:
+                    raise ValueError("axis must be 'x' or 'y'.")
+
+            for curve in scene.curves.values():
+                theater = scene.theaters.get(curve.theater_id) if curve.theater_id is not None else None
+                extents = curve.visible_extents(theater)
+                if extents is None:
+                    continue
+                if axis == "x":
                     values.append(np.asarray([extents[0], extents[1]], dtype=float))
-        elif axis == "y":
-            for curve in curve_templates.values():
-                extents = curve.visible_extents()
-                if extents is not None:
+                elif axis == "y":
                     values.append(np.asarray([extents[2], extents[3]], dtype=float))
-            for fill in fill_templates.values():
-                extents = fill.visible_extents()
-                if extents is not None:
+                else:
+                    raise ValueError("axis must be 'x' or 'y'.")
+
+            for fill in scene.fills.values():
+                theater = scene.theaters.get(fill.theater_id) if fill.theater_id is not None else None
+                extents = fill.visible_extents(theater)
+                if extents is None:
+                    continue
+                if axis == "x":
+                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
+                elif axis == "y":
                     values.append(np.asarray([extents[2], extents[3]], dtype=float))
-        else:
-            raise ValueError("axis must be 'x' or 'y'.")
+                else:
+                    raise ValueError("axis must be 'x' or 'y'.")
 
         if not values:
             return (0.0, 1.0)
@@ -401,9 +475,25 @@ class Schedule:
         padding = (maximum - minimum) * 0.05
         return (minimum - padding, maximum + padding)
 
+    def _scenes_for_limits(
+        self,
+        prepared: list[_PreparedTransition],
+        final_scene: Scene,
+    ) -> list[Scene]:
+        scenes = [self.initial_scene]
+        for item in prepared:
+            scenes.append(item.start_scene)
+            scenes.append(item.end_scene)
+        scenes.append(final_scene)
+        return scenes
+
 
 def _scenes_equal(left: Scene, right: Scene) -> bool:
-    return _curve_mapping_equal(left.curves, right.curves) and _fill_mapping_equal(left.fills, right.fills)
+    return (
+        _curve_mapping_equal(left.curves, right.curves)
+        and _fill_mapping_equal(left.fills, right.fills)
+        and _theater_mapping_equal(left.theaters, right.theaters)
+    )
 
 
 def _curve_mapping_equal(left: Mapping[str, Curve], right: Mapping[str, Curve]) -> bool:
@@ -420,6 +510,13 @@ def _fill_mapping_equal(left: Mapping[str, FillBetweenArea], right: Mapping[str,
     return all(_fills_equal(left[fill_id], right[fill_id]) for fill_id in left)
 
 
+def _theater_mapping_equal(left: Mapping[str, Theater], right: Mapping[str, Theater]) -> bool:
+    if left.keys() != right.keys():
+        return False
+
+    return all(_theaters_equal(left[theater_id], right[theater_id]) for theater_id in left)
+
+
 def _curves_equal(left: Curve, right: Curve) -> bool:
     return (
         left.curve_id == right.curve_id
@@ -431,6 +528,7 @@ def _curves_equal(left: Curve, right: Curve) -> bool:
         and left.linewidth == right.linewidth
         and _values_equal(left.domain, right.domain)
         and _values_equal(left.value_range, right.value_range)
+        and left.theater_id == right.theater_id
         and _values_equal(left.line_kwargs, right.line_kwargs)
     )
 
@@ -447,7 +545,24 @@ def _fills_equal(left: FillBetweenArea, right: FillBetweenArea) -> bool:
         and left.linewidth == right.linewidth
         and _values_equal(left.domain, right.domain)
         and _values_equal(left.value_range, right.value_range)
+        and left.theater_id == right.theater_id
         and _values_equal(left.fill_kwargs, right.fill_kwargs)
+    )
+
+
+def _theaters_equal(left: Theater, right: Theater) -> bool:
+    return (
+        left.theater_id == right.theater_id
+        and _values_equal(left.xlim, right.xlim)
+        and _values_equal(left.ylim, right.ylim)
+        and _values_equal(left.local_xlim, right.local_xlim)
+        and _values_equal(left.local_ylim, right.local_ylim)
+        and left.facecolor == right.facecolor
+        and left.edgecolor == right.edgecolor
+        and left.alpha == right.alpha
+        and left.linestyle == right.linestyle
+        and left.linewidth == right.linewidth
+        and _values_equal(left.patch_kwargs, right.patch_kwargs)
     )
 
 
