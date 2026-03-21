@@ -8,11 +8,12 @@ The library models animation as:
 - `Transition`: a time-dependent change from one scene to the next
 - `Schedule`: a sequence of timed transitions compiled into a `FuncAnimation`
 
-At the moment, coordinates are normalized into `[0, 1]` for both axes.
+Curves and fills can use arbitrary finite plot coordinates.
 
 ## Features
 
 - draw, move, erase, and pause transitions
+- erase transitions for `fill_between` regions
 - `fill_between` creation and movement
 - concurrent transitions with `ParallelTransition`
 - style changes for color, alpha, linewidth, and linestyle
@@ -100,6 +101,13 @@ schedule.add(
     ),
     duration=0.8,
 )
+```
+
+Use arbitrary axis ranges when rendering:
+
+```python
+fig, ax = plt.subplots(figsize=(10, 6))
+anim = schedule.build_animation(fig=fig, ax=ax, xlim=(-0.2, 1.2), ylim=(-0.2, 1.2))
 ```
 
 ## Notebook Demo

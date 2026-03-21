@@ -5,6 +5,7 @@ from .schedule import Schedule
 from .transitions import (
     CurveStyleTransition,
     DrawTransition,
+    EraseFillBetweenTransition,
     EraseTransition,
     FillBetweenTransition,
     FillStyleTransition,
@@ -22,6 +23,7 @@ __all__ = [
     "Curve",
     "CurveStyleTransition",
     "DrawTransition",
+    "EraseFillBetweenTransition",
     "EraseTransition",
     "FillBetweenArea",
     "FillBetweenTransition",

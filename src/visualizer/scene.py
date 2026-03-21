@@ -10,18 +10,18 @@ import numpy.typing as npt
 FloatArray = npt.NDArray[np.float64]
 
 
-def _coerce_unit_interval_array(values: npt.ArrayLike, name: str) -> FloatArray:
+def _coerce_coordinate_array(values: npt.ArrayLike, name: str) -> FloatArray:
     array = np.asarray(values, dtype=float)
 
     if array.ndim != 1:
         raise ValueError(f"{name} must be a one-dimensional array.")
-    if np.any((array < 0.0) | (array > 1.0)):
-        raise ValueError(f"{name} must contain values inside [0, 1].")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
 
     return array
 
 
-def _coerce_matching_unit_interval_array(
+def _coerce_matching_coordinate_array(
     values: npt.ArrayLike | float,
     name: str,
     shape: tuple[int, ...],
@@ -35,8 +35,8 @@ def _coerce_matching_unit_interval_array(
 
     if array.shape != shape:
         raise ValueError(f"{name} must match the reference shape {shape}.")
-    if np.any((array < 0.0) | (array > 1.0)):
-        raise ValueError(f"{name} must contain values inside [0, 1].")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
 
     return array
 
@@ -77,7 +77,7 @@ def _merge_style_kwargs(
 
 @dataclass(frozen=True)
 class Curve:
-    """A single curve in normalized [0, 1] x [0, 1] coordinates."""
+    """A single curve in plot coordinates."""
 
     curve_id: str
     x: npt.ArrayLike
@@ -89,8 +89,8 @@ class Curve:
     line_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        x_array = _coerce_unit_interval_array(self.x, "x")
-        y_array = _coerce_unit_interval_array(self.y, "y")
+        x_array = _coerce_coordinate_array(self.x, "x")
+        y_array = _coerce_coordinate_array(self.y, "y")
 
         if x_array.shape != y_array.shape:
             raise ValueError("x and y must have the same shape.")
@@ -136,23 +136,41 @@ class Curve:
         )
 
     def reveal_until(self, progress: float) -> Curve:
-        """Reveal points with x <= progress."""
+        """Reveal points from left to right based on normalized progress."""
 
         threshold = _clamp_progress(progress)
-        mask = self.x <= threshold
+        if self.is_empty:
+            return self
+
+        x_min = float(np.min(self.x))
+        x_max = float(np.max(self.x))
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold > 0.0, dtype=bool)
+        else:
+            x_threshold = x_min + (x_max - x_min) * threshold
+            mask = self.x <= x_threshold
         return self.copy_with(x=self.x[mask], y=self.y[mask])
 
     def hide_until(self, progress: float) -> Curve:
-        """Hide points with x <= progress."""
+        """Hide points from left to right based on normalized progress."""
 
         threshold = _clamp_progress(progress)
-        mask = self.x > threshold
+        if self.is_empty:
+            return self
+
+        x_min = float(np.min(self.x))
+        x_max = float(np.max(self.x))
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold < 1.0, dtype=bool)
+        else:
+            x_threshold = x_min + (x_max - x_min) * threshold
+            mask = self.x > x_threshold
         return self.copy_with(x=self.x[mask], y=self.y[mask])
 
 
 @dataclass(frozen=True)
 class FillBetweenArea:
-    """A normalized filled region between y1(x) and y2(x)."""
+    """A filled region between y1(x) and y2(x)."""
 
     fill_id: str
     x: npt.ArrayLike
@@ -165,13 +183,13 @@ class FillBetweenArea:
     fill_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        x_array = _coerce_unit_interval_array(self.x, "x")
-        y1_array = _coerce_unit_interval_array(self.y1, "y1")
+        x_array = _coerce_coordinate_array(self.x, "x")
+        y1_array = _coerce_coordinate_array(self.y1, "y1")
 
         if x_array.shape != y1_array.shape:
             raise ValueError("x and y1 must have the same shape.")
 
-        y2_array = _coerce_matching_unit_interval_array(self.y2, "y2", x_array.shape)
+        y2_array = _coerce_matching_coordinate_array(self.y2, "y2", x_array.shape)
 
         object.__setattr__(self, "x", x_array)
         object.__setattr__(self, "y1", y1_array)
@@ -218,12 +236,30 @@ class FillBetweenArea:
 
     def reveal_until(self, progress: float) -> FillBetweenArea:
         threshold = _clamp_progress(progress)
-        mask = self.x <= threshold
+        if self.is_empty:
+            return self
+
+        x_min = float(np.min(self.x))
+        x_max = float(np.max(self.x))
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold > 0.0, dtype=bool)
+        else:
+            x_threshold = x_min + (x_max - x_min) * threshold
+            mask = self.x <= x_threshold
         return self.copy_with(x=self.x[mask], y1=self.y1[mask], y2=self.y2[mask])
 
     def hide_until(self, progress: float) -> FillBetweenArea:
         threshold = _clamp_progress(progress)
-        mask = self.x > threshold
+        if self.is_empty:
+            return self
+
+        x_min = float(np.min(self.x))
+        x_max = float(np.max(self.x))
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold < 1.0, dtype=bool)
+        else:
+            x_threshold = x_min + (x_max - x_min) * threshold
+            mask = self.x > x_threshold
         return self.copy_with(x=self.x[mask], y1=self.y1[mask], y2=self.y2[mask])
 
 

@@ -14,8 +14,8 @@ from .scene import (
     FloatArray,
     Scene,
     _clamp_progress,
-    _coerce_matching_unit_interval_array,
-    _coerce_unit_interval_array,
+    _coerce_coordinate_array,
+    _coerce_matching_coordinate_array,
     _validate_alpha,
 )
 
@@ -85,8 +85,8 @@ class GlowOverlay:
     artist_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        x_array = _coerce_unit_interval_array(self.x, "glow x")
-        y_array = _coerce_unit_interval_array(self.y, "glow y")
+        x_array = _coerce_coordinate_array(self.x, "glow x")
+        y_array = _coerce_coordinate_array(self.y, "glow y")
 
         if x_array.shape != y_array.shape:
             raise ValueError("Glow overlay x and y must have the same shape.")
@@ -245,6 +245,20 @@ class EraseTransition(Transition):
 
 
 @dataclass(frozen=True)
+class EraseFillBetweenTransition(Transition):
+    fill_id: str
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        fill = scene.get_fill(self.fill_id)
+        updated = dict(scene.fills)
+        updated[self.fill_id] = fill.hide_until(_clamp_progress(progress))
+        return Scene(curves=scene.curves, fills=updated)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene.remove_fill(self.fill_id)
+
+
+@dataclass(frozen=True)
 class MoveTransition(Transition):
     curve_id: str
     x_prime: npt.ArrayLike
@@ -256,8 +270,8 @@ class MoveTransition(Transition):
     line_kwargs: Mapping[str, Any] | None = field(default=None)
 
     def __post_init__(self) -> None:
-        x_prime = _coerce_unit_interval_array(self.x_prime, "x_prime")
-        y_prime = _coerce_unit_interval_array(self.y_prime, "y_prime")
+        x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
+        y_prime = _coerce_coordinate_array(self.y_prime, "y_prime")
 
         if x_prime.shape != y_prime.shape:
             raise ValueError("x_prime and y_prime must have the same shape.")
@@ -319,13 +333,13 @@ class MoveFillBetweenTransition(Transition):
     fill_kwargs: Mapping[str, Any] | None = field(default=None)
 
     def __post_init__(self) -> None:
-        x_prime = _coerce_unit_interval_array(self.x_prime, "x_prime")
-        y1_prime = _coerce_unit_interval_array(self.y1_prime, "y1_prime")
+        x_prime = _coerce_coordinate_array(self.x_prime, "x_prime")
+        y1_prime = _coerce_coordinate_array(self.y1_prime, "y1_prime")
 
         if x_prime.shape != y1_prime.shape:
             raise ValueError("x_prime and y1_prime must have the same shape.")
 
-        y2_prime = _coerce_matching_unit_interval_array(self.y2_prime, "y2_prime", x_prime.shape)
+        y2_prime = _coerce_matching_coordinate_array(self.y2_prime, "y2_prime", x_prime.shape)
 
         object.__setattr__(self, "x_prime", x_prime)
         object.__setattr__(self, "y1_prime", y1_prime)
@@ -601,8 +615,8 @@ class JitterTransition(Transition):
         )
 
         perturbed_curve = curve.copy_with(
-            x=np.clip(curve.x + x_offset, 0.0, 1.0),
-            y=np.clip(curve.y + y_offset, 0.0, 1.0),
+            x=curve.x + x_offset,
+            y=curve.y + y_offset,
         )
         return scene.update_curve(perturbed_curve)
 
@@ -658,8 +672,8 @@ class JitterFillBetweenTransition(Transition):
         )
 
         perturbed_fill = fill.copy_with(
-            x=np.clip(fill.x + x_offset, 0.0, 1.0),
-            y1=np.clip(fill.y1 + y1_offset, 0.0, 1.0),
-            y2=np.clip(fill.y2 + y2_offset, 0.0, 1.0),
+            x=fill.x + x_offset,
+            y1=fill.y1 + y1_offset,
+            y2=fill.y2 + y2_offset,
         )
         return scene.update_fill(perturbed_fill)
