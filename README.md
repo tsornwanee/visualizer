@@ -19,6 +19,7 @@ Curves and fills can use arbitrary finite plot coordinates.
 - style changes for color, alpha, linewidth, and linestyle
 - transient emphasis effects like stress glow and jitter
 - support for pre-populated initial scenes
+- act-based composition via `final_scene`, `next_act()`, and `Schedule.combine(...)`
 - automatic axis fitting for arbitrary coordinate ranges
 - per-curve and per-fill clipping windows via `domain` and `value_range`
 
@@ -88,6 +89,29 @@ schedule.add_break(0.75)
 # or
 schedule.pause(0.75)
 ```
+
+Build animation in modular acts:
+
+```python
+from visualizer import Curve, DrawTransition, EraseTransition, MoveTransition, Schedule
+
+act_1 = Schedule()
+act_1.add(DrawTransition(Curve("u", x, y, color="#dc2626", linewidth=3.0)), duration=1.5)
+
+act_2 = act_1.next_act()
+act_2.add_break(0.5)
+act_2.add(MoveTransition("u", x_prime=None, y_prime=y_prime), duration=1.25)
+
+act_3 = act_2.next_act()
+act_3.add(EraseTransition("u"), duration=1.0)
+
+full_schedule = Schedule.combine(
+    [act_1, act_2, act_3],
+    validate_initial_scene=True,
+)
+```
+
+`next_act()` starts a new schedule from the previous act's final scene, which makes it easy to debug or render each act independently. `Schedule.combine(...)` stitches those acts back into one continuous schedule later. If you want to append onto an existing schedule in place, use `extend_schedule(...)`; if you want a new combined schedule without mutating the original, use `appended(...)`.
 
 Jitter a curve and its fill together:
 

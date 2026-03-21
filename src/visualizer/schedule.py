@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import matplotlib.pyplot as plt
@@ -53,6 +54,74 @@ class Schedule:
     @property
     def total_duration(self) -> float:
         return sum(entry.duration for entry in self.entries)
+
+    @property
+    def final_scene(self) -> Scene:
+        current_scene = self.initial_scene
+
+        for entry in self.entries:
+            current_scene = entry.transition.apply(current_scene)
+
+        return current_scene
+
+    def next_act(self) -> Schedule:
+        return Schedule(initial_scene=self.final_scene)
+
+    def extend_schedule(
+        self,
+        other: Schedule,
+        *,
+        validate_initial_scene: bool = False,
+    ) -> Schedule:
+        if not isinstance(other, Schedule):
+            raise TypeError("other must be a Schedule.")
+
+        if validate_initial_scene and not _scenes_equal(self.final_scene, other.initial_scene):
+            raise ValueError(
+                "The appended schedule's initial_scene does not match the current final_scene."
+            )
+
+        self.entries.extend(other.entries)
+        return self
+
+    def appended(
+        self,
+        other: Schedule,
+        *,
+        validate_initial_scene: bool = False,
+    ) -> Schedule:
+        combined = Schedule(
+            initial_scene=self.initial_scene,
+            entries=list(self.entries),
+        )
+        return combined.extend_schedule(
+            other,
+            validate_initial_scene=validate_initial_scene,
+        )
+
+    @classmethod
+    def combine(
+        cls,
+        schedules: Iterable[Schedule],
+        *,
+        validate_initial_scene: bool = False,
+    ) -> Schedule:
+        schedule_list = list(schedules)
+        if not schedule_list:
+            return cls()
+
+        combined = cls(
+            initial_scene=schedule_list[0].initial_scene,
+            entries=list(schedule_list[0].entries),
+        )
+
+        for schedule in schedule_list[1:]:
+            combined.extend_schedule(
+                schedule,
+                validate_initial_scene=validate_initial_scene,
+            )
+
+        return combined
 
     def scenes(self) -> list[Scene]:
         scenes = [self.initial_scene]
@@ -331,3 +400,74 @@ class Schedule:
 
         padding = (maximum - minimum) * 0.05
         return (minimum - padding, maximum + padding)
+
+
+def _scenes_equal(left: Scene, right: Scene) -> bool:
+    return _curve_mapping_equal(left.curves, right.curves) and _fill_mapping_equal(left.fills, right.fills)
+
+
+def _curve_mapping_equal(left: Mapping[str, Curve], right: Mapping[str, Curve]) -> bool:
+    if left.keys() != right.keys():
+        return False
+
+    return all(_curves_equal(left[curve_id], right[curve_id]) for curve_id in left)
+
+
+def _fill_mapping_equal(left: Mapping[str, FillBetweenArea], right: Mapping[str, FillBetweenArea]) -> bool:
+    if left.keys() != right.keys():
+        return False
+
+    return all(_fills_equal(left[fill_id], right[fill_id]) for fill_id in left)
+
+
+def _curves_equal(left: Curve, right: Curve) -> bool:
+    return (
+        left.curve_id == right.curve_id
+        and np.array_equal(left.x, right.x)
+        and np.array_equal(left.y, right.y)
+        and left.color == right.color
+        and left.alpha == right.alpha
+        and left.linestyle == right.linestyle
+        and left.linewidth == right.linewidth
+        and _values_equal(left.domain, right.domain)
+        and _values_equal(left.value_range, right.value_range)
+        and _values_equal(left.line_kwargs, right.line_kwargs)
+    )
+
+
+def _fills_equal(left: FillBetweenArea, right: FillBetweenArea) -> bool:
+    return (
+        left.fill_id == right.fill_id
+        and np.array_equal(left.x, right.x)
+        and np.array_equal(left.y1, right.y1)
+        and np.array_equal(left.y2, right.y2)
+        and left.color == right.color
+        and left.alpha == right.alpha
+        and left.linestyle == right.linestyle
+        and left.linewidth == right.linewidth
+        and _values_equal(left.domain, right.domain)
+        and _values_equal(left.value_range, right.value_range)
+        and _values_equal(left.fill_kwargs, right.fill_kwargs)
+    )
+
+
+def _values_equal(left: object, right: object) -> bool:
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        try:
+            return np.array_equal(np.asarray(left), np.asarray(right))
+        except Exception:
+            return False
+
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if left.keys() != right.keys():
+            return False
+        return all(_values_equal(left[key], right[key]) for key in left)
+
+    if isinstance(left, Sequence) and isinstance(right, Sequence):
+        if isinstance(left, (str, bytes)) or isinstance(right, (str, bytes)):
+            return left == right
+        if len(left) != len(right):
+            return False
+        return all(_values_equal(left_item, right_item) for left_item, right_item in zip(left, right))
+
+    return left == right
