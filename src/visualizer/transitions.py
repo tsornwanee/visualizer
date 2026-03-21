@@ -106,8 +106,17 @@ class GlowOverlay:
     artist_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        x_array = _coerce_coordinate_array(self.x, "glow x")
-        y_array = _coerce_coordinate_array(self.y, "glow y")
+        x_array = np.asarray(self.x, dtype=float)
+        y_array = np.asarray(self.y, dtype=float)
+
+        if x_array.ndim != 1:
+            raise ValueError("glow x must be a one-dimensional array.")
+        if y_array.ndim != 1:
+            raise ValueError("glow y must be a one-dimensional array.")
+        if np.any(np.isinf(x_array)):
+            raise ValueError("glow x must not contain infinite values.")
+        if np.any(np.isinf(y_array)):
+            raise ValueError("glow y must not contain infinite values.")
 
         if x_array.shape != y_array.shape:
             raise ValueError("Glow overlay x and y must have the same shape.")
