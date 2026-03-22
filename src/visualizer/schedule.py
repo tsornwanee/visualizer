@@ -8,13 +8,98 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
-from matplotlib.collections import PolyCollection
+from matplotlib.collections import PathCollection, PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.text import Text as MplText
 
-from .scene import Curve, FillBetweenArea, Scene, Text
+from .scene import Curve, FillBetweenArea, Scatter, Scene, Text
 from .transitions import FrameState, PauseTransition, Transition
+
+
+def plot_scene(
+    scene: Scene,
+    *,
+    fig: Figure | None = None,
+    ax: Axes | None = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    title: str | None = None,
+) -> tuple[Figure, Axes]:
+    if ax is None and fig is None:
+        fig, ax = plt.subplots()
+    elif ax is None and fig is not None:
+        ax = fig.gca()
+    elif ax is not None and fig is None:
+        fig = ax.figure
+
+    assert fig is not None
+    assert ax is not None
+
+    resolved_xlim = xlim or _infer_axis_limits_for_templates(
+        scene.curves,
+        scene.scatters,
+        scene.fills,
+        scene.texts,
+        axis="x",
+    )
+    resolved_ylim = ylim or _infer_axis_limits_for_templates(
+        scene.curves,
+        scene.scatters,
+        scene.fills,
+        scene.texts,
+        axis="y",
+    )
+
+    ax.set_xlim(*resolved_xlim)
+    ax.set_ylim(*resolved_ylim)
+    if title is not None:
+        ax.set_title(title)
+
+    for fill in scene.fills.values():
+        if fill.is_empty:
+            continue
+        for x_values, y1_values, y2_values, where, fill_kwargs in fill.fill_segments():
+            ax.fill_between(
+                x_values,
+                y1_values,
+                y2_values,
+                where=where,
+                interpolate=True,
+                **fill_kwargs,
+            )
+
+    for scatter in scene.scatters.values():
+        if scatter.is_empty:
+            continue
+        x_values, y_values, sizes = scatter.clipped_scatter_data()
+        if x_values.size == 0:
+            continue
+        ax.scatter(
+            x_values,
+            y_values,
+            **scatter.mpl_scatter_kwargs(size=sizes),
+        )
+
+    for curve in scene.curves.values():
+        if curve.is_empty:
+            continue
+        clipped_x, clipped_y = curve.clipped_line_data()
+        if clipped_x.size == 0:
+            continue
+        ax.plot(clipped_x, clipped_y, **curve.mpl_line_kwargs())
+
+    for text in scene.texts.values():
+        if not text.is_visible():
+            continue
+        ax.text(
+            text.x,
+            text.y,
+            text.content,
+            **text.mpl_text_kwargs(),
+        )
+
+    return fig, ax
 
 
 @dataclass(frozen=True)
@@ -138,6 +223,35 @@ class Schedule:
         prepared = self._prepare()
         return self._frame_state_from_prepared(prepared, elapsed_seconds).scene
 
+    def plot_scene(
+        self,
+        elapsed_seconds: float | None = None,
+        *,
+        scene: Scene | None = None,
+        fig: Figure | None = None,
+        ax: Axes | None = None,
+        xlim: tuple[float, float] | None = None,
+        ylim: tuple[float, float] | None = None,
+        title: str | None = None,
+    ) -> tuple[Figure, Axes]:
+        if scene is not None and elapsed_seconds is not None:
+            raise ValueError("Pass either scene or elapsed_seconds, not both.")
+
+        resolved_scene = scene
+        if resolved_scene is None:
+            resolved_scene = (
+                self.final_scene if elapsed_seconds is None else self.scene_at(elapsed_seconds)
+            )
+
+        return plot_scene(
+            resolved_scene,
+            fig=fig,
+            ax=ax,
+            xlim=xlim,
+            ylim=ylim,
+            title=title,
+        )
+
     def build_animation(
         self,
         *,
@@ -156,6 +270,7 @@ class Schedule:
         prepared = self._prepare()
         final_scene = prepared[-1].end_scene if prepared else self.initial_scene
         curve_templates = self._collect_curve_templates(prepared, final_scene)
+        scatter_templates = self._collect_scatter_templates(prepared, final_scene)
         fill_templates = self._collect_fill_templates(prepared, final_scene)
         text_templates = self._collect_text_templates(prepared, final_scene)
 
@@ -171,12 +286,14 @@ class Schedule:
 
         resolved_xlim = xlim or self._infer_axis_limits(
             curve_templates,
+            scatter_templates,
             fill_templates,
             text_templates,
             axis="x",
         )
         resolved_ylim = ylim or self._infer_axis_limits(
             curve_templates,
+            scatter_templates,
             fill_templates,
             text_templates,
             axis="y",
@@ -194,7 +311,10 @@ class Schedule:
             line.set_visible(False)
             lines[curve_id] = line
 
-        fills: dict[str, PolyCollection | None] = {fill_id: None for fill_id in fill_templates}
+        scatters: dict[str, PathCollection | None] = {
+            scatter_id: None for scatter_id in scatter_templates
+        }
+        fills: dict[str, list[PolyCollection]] = {fill_id: [] for fill_id in fill_templates}
         texts: dict[str, MplText] = {}
         for text_id in text_templates:
             artist = ax.text(0.0, 0.0, "")
@@ -227,25 +347,43 @@ class Schedule:
                 artists.append(line)
 
             for fill_id, collection in fills.items():
-                if collection is not None:
-                    collection.remove()
-                    fills[fill_id] = None
+                for artist in collection:
+                    artist.remove()
+                fills[fill_id] = []
 
                 if frame_state.scene.contains_fill(fill_id):
                     fill = frame_state.scene.get_fill(fill_id)
                     if not fill.is_empty:
-                        x_values, y1_values, y2_values, where = fill.clipped_fill_data()
-                        if not np.any(where):
-                            continue
-                        fills[fill_id] = ax.fill_between(
-                            x_values,
-                            y1_values,
-                            y2_values,
-                            where=where,
-                            interpolate=True,
-                            **fill.mpl_fill_kwargs(),
-                        )
-                        artists.append(fills[fill_id])
+                        for x_values, y1_values, y2_values, where, fill_kwargs in fill.fill_segments():
+                            collection = ax.fill_between(
+                                x_values,
+                                y1_values,
+                                y2_values,
+                                where=where,
+                                interpolate=True,
+                                **fill_kwargs,
+                            )
+                            fills[fill_id].append(collection)
+                            artists.append(collection)
+
+            for scatter_id, collection in scatters.items():
+                if collection is not None:
+                    collection.remove()
+                    scatters[scatter_id] = None
+
+                if frame_state.scene.contains_scatter(scatter_id):
+                    scatter = frame_state.scene.get_scatter(scatter_id)
+                    if scatter.is_empty:
+                        continue
+                    x_values, y_values, sizes = scatter.clipped_scatter_data()
+                    if x_values.size == 0:
+                        continue
+                    scatters[scatter_id] = ax.scatter(
+                        x_values,
+                        y_values,
+                        **scatter.mpl_scatter_kwargs(size=sizes),
+                    )
+                    artists.append(scatters[scatter_id])
 
             for text_id, artist in texts.items():
                 if frame_state.scene.contains_text(text_id):
@@ -389,6 +527,20 @@ class Schedule:
         templates.update(final_scene.fills)
         return templates
 
+    def _collect_scatter_templates(
+        self,
+        prepared: list[_PreparedTransition],
+        final_scene: Scene,
+    ) -> dict[str, Scatter]:
+        templates: dict[str, Scatter] = dict(self.initial_scene.scatters)
+
+        for item in prepared:
+            templates.update(item.start_scene.scatters)
+            templates.update(item.end_scene.scatters)
+
+        templates.update(final_scene.scatters)
+        return templates
+
     def _collect_text_templates(
         self,
         prepared: list[_PreparedTransition],
@@ -406,59 +558,86 @@ class Schedule:
     def _infer_axis_limits(
         self,
         curve_templates: dict[str, Curve],
+        scatter_templates: dict[str, Scatter],
         fill_templates: dict[str, FillBetweenArea],
         text_templates: dict[str, Text],
         *,
         axis: str,
     ) -> tuple[float, float]:
-        values: list[np.ndarray] = []
+        return _infer_axis_limits_for_templates(
+            curve_templates,
+            scatter_templates,
+            fill_templates,
+            text_templates,
+            axis=axis,
+        )
 
-        if axis == "x":
-            for curve in curve_templates.values():
-                extents = curve.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
-            for fill in fill_templates.values():
-                extents = fill.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
-            for text in text_templates.values():
-                extents = text.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[0], extents[1]], dtype=float))
-        elif axis == "y":
-            for curve in curve_templates.values():
-                extents = curve.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
-            for fill in fill_templates.values():
-                extents = fill.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
-            for text in text_templates.values():
-                extents = text.visible_extents()
-                if extents is not None:
-                    values.append(np.asarray([extents[2], extents[3]], dtype=float))
-        else:
-            raise ValueError("axis must be 'x' or 'y'.")
 
-        if not values:
-            return (0.0, 1.0)
+def _infer_axis_limits_for_templates(
+    curve_templates: Mapping[str, Curve],
+    scatter_templates: Mapping[str, Scatter],
+    fill_templates: Mapping[str, FillBetweenArea],
+    text_templates: Mapping[str, Text],
+    *,
+    axis: str,
+) -> tuple[float, float]:
+    values: list[np.ndarray] = []
 
-        minimum = float(min(np.min(value) for value in values))
-        maximum = float(max(np.max(value) for value in values))
+    if axis == "x":
+        for curve in curve_templates.values():
+            extents = curve.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[0], extents[1]], dtype=float))
+        for scatter in scatter_templates.values():
+            extents = scatter.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[0], extents[1]], dtype=float))
+        for fill in fill_templates.values():
+            extents = fill.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[0], extents[1]], dtype=float))
+        for text in text_templates.values():
+            extents = text.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[0], extents[1]], dtype=float))
+    elif axis == "y":
+        for curve in curve_templates.values():
+            extents = curve.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[2], extents[3]], dtype=float))
+        for scatter in scatter_templates.values():
+            extents = scatter.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[2], extents[3]], dtype=float))
+        for fill in fill_templates.values():
+            extents = fill.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[2], extents[3]], dtype=float))
+        for text in text_templates.values():
+            extents = text.visible_extents()
+            if extents is not None:
+                values.append(np.asarray([extents[2], extents[3]], dtype=float))
+    else:
+        raise ValueError("axis must be 'x' or 'y'.")
 
-        if np.isclose(minimum, maximum):
-            padding = max(abs(minimum) * 0.05, 0.5)
-            return (minimum - padding, maximum + padding)
+    if not values:
+        return (0.0, 1.0)
 
-        padding = (maximum - minimum) * 0.05
+    minimum = float(min(np.min(value) for value in values))
+    maximum = float(max(np.max(value) for value in values))
+
+    if np.isclose(minimum, maximum):
+        padding = max(abs(minimum) * 0.05, 0.5)
         return (minimum - padding, maximum + padding)
+
+    padding = (maximum - minimum) * 0.05
+    return (minimum - padding, maximum + padding)
 
 
 def _scenes_equal(left: Scene, right: Scene) -> bool:
     return (
         _curve_mapping_equal(left.curves, right.curves)
+        and _scatter_mapping_equal(left.scatters, right.scatters)
         and _fill_mapping_equal(left.fills, right.fills)
         and _text_mapping_equal(left.texts, right.texts)
     )
@@ -476,6 +655,13 @@ def _fill_mapping_equal(left: Mapping[str, FillBetweenArea], right: Mapping[str,
         return False
 
     return all(_fills_equal(left[fill_id], right[fill_id]) for fill_id in left)
+
+
+def _scatter_mapping_equal(left: Mapping[str, Scatter], right: Mapping[str, Scatter]) -> bool:
+    if left.keys() != right.keys():
+        return False
+
+    return all(_scatters_equal(left[scatter_id], right[scatter_id]) for scatter_id in left)
 
 
 def _text_mapping_equal(left: Mapping[str, Text], right: Mapping[str, Text]) -> bool:
@@ -507,12 +693,31 @@ def _fills_equal(left: FillBetweenArea, right: FillBetweenArea) -> bool:
         and np.array_equal(left.y1, right.y1)
         and np.array_equal(left.y2, right.y2)
         and left.color == right.color
+        and left.positive_color == right.positive_color
+        and left.negative_color == right.negative_color
         and left.alpha == right.alpha
         and left.linestyle == right.linestyle
         and left.linewidth == right.linewidth
         and _values_equal(left.domain, right.domain)
         and _values_equal(left.value_range, right.value_range)
         and _values_equal(left.fill_kwargs, right.fill_kwargs)
+    )
+
+
+def _scatters_equal(left: Scatter, right: Scatter) -> bool:
+    return (
+        left.scatter_id == right.scatter_id
+        and np.array_equal(left.x, right.x)
+        and np.array_equal(left.y, right.y)
+        and np.array_equal(left.size, right.size)
+        and _values_equal(left.color, right.color)
+        and left.alpha == right.alpha
+        and _values_equal(left.marker, right.marker)
+        and left.linewidth == right.linewidth
+        and _values_equal(left.edgecolor, right.edgecolor)
+        and _values_equal(left.domain, right.domain)
+        and _values_equal(left.value_range, right.value_range)
+        and _values_equal(left.scatter_kwargs, right.scatter_kwargs)
     )
 
 

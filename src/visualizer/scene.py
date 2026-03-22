@@ -437,6 +437,182 @@ class Curve:
 
 
 @dataclass(frozen=True)
+class Scatter:
+    """A scatter layer in plot coordinates."""
+
+    scatter_id: str
+    x: npt.ArrayLike
+    y: npt.ArrayLike
+    color: Any | None = None
+    alpha: float | None = None
+    marker: Any = "o"
+    size: npt.ArrayLike | float = 36.0
+    linewidth: float | None = None
+    edgecolor: Any | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
+    scatter_kwargs: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        x_array = _coerce_coordinate_array(self.x, "x")
+        y_array = _coerce_coordinate_array(self.y, "y")
+
+        if x_array.shape != y_array.shape:
+            raise ValueError("x and y must have the same shape.")
+        if self.linewidth is not None and self.linewidth < 0:
+            raise ValueError("linewidth must be non-negative.")
+
+        size_array = _coerce_matching_coordinate_array(self.size, "size", x_array.shape)
+        if np.any(size_array < 0.0):
+            raise ValueError("size must be non-negative.")
+
+        object.__setattr__(self, "x", x_array)
+        object.__setattr__(self, "y", y_array)
+        object.__setattr__(self, "size", size_array)
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_bounds(self.domain, "domain"))
+        object.__setattr__(self, "value_range", _normalize_bounds(self.value_range, "value_range"))
+        object.__setattr__(self, "scatter_kwargs", dict(self.scatter_kwargs))
+
+    @property
+    def is_empty(self) -> bool:
+        return self.x.size == 0
+
+    def mpl_scatter_kwargs(
+        self,
+        *,
+        size: npt.ArrayLike | float | None = None,
+    ) -> dict[str, Any]:
+        kwargs = dict(self.scatter_kwargs)
+        if self.color is not None:
+            kwargs["color"] = self.color
+        if self.alpha is not None:
+            kwargs["alpha"] = self.alpha
+        kwargs.setdefault("marker", self.marker)
+        kwargs.setdefault("s", self.size if size is None else size)
+        if self.linewidth is not None:
+            kwargs.setdefault("linewidths", self.linewidth)
+        if self.edgecolor is not None:
+            kwargs.setdefault("edgecolors", self.edgecolor)
+        return kwargs
+
+    def copy_with(
+        self,
+        *,
+        x: npt.ArrayLike | None = None,
+        y: npt.ArrayLike | None = None,
+        color: Any | None = None,
+        alpha: float | None = None,
+        marker: Any | None = None,
+        size: npt.ArrayLike | float | None = None,
+        linewidth: float | None = None,
+        edgecolor: Any | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+        scatter_kwargs: Mapping[str, Any] | None = None,
+    ) -> Scatter:
+        return Scatter(
+            scatter_id=self.scatter_id,
+            x=self.x if x is None else x,
+            y=self.y if y is None else y,
+            color=self.color if color is None else color,
+            alpha=self.alpha if alpha is None else alpha,
+            marker=self.marker if marker is None else marker,
+            size=self.size if size is None else size,
+            linewidth=self.linewidth if linewidth is None else linewidth,
+            edgecolor=self.edgecolor if edgecolor is None else edgecolor,
+            domain=self.domain if domain is None else domain,
+            value_range=self.value_range if value_range is None else value_range,
+            scatter_kwargs=self.scatter_kwargs if scatter_kwargs is None else scatter_kwargs,
+        )
+
+    def clipped_scatter_data(self) -> tuple[FloatArray, FloatArray, FloatArray]:
+        if self.is_empty:
+            empty = np.asarray([], dtype=float)
+            return empty, empty, empty
+
+        mask = np.ones(self.x.shape, dtype=bool)
+        if self.domain is not None:
+            mask &= (self.x >= self.domain[0]) & (self.x <= self.domain[1])
+        if self.value_range is not None:
+            mask &= (self.y >= self.value_range[0]) & (self.y <= self.value_range[1])
+
+        return self.x[mask], self.y[mask], self.size[mask]
+
+    def point_is_visible(self, x_value: float, y_value: float) -> bool:
+        return _point_is_visible(
+            x_value,
+            y_value,
+            domain=self.domain,
+            value_range=self.value_range,
+        )
+
+    def visible_extents(self) -> tuple[float, float, float, float] | None:
+        clipped_x, clipped_y, _ = self.clipped_scatter_data()
+        if clipped_x.size == 0:
+            return None
+
+        return (
+            float(np.min(clipped_x)),
+            float(np.max(clipped_x)),
+            float(np.min(clipped_y)),
+            float(np.max(clipped_y)),
+        )
+
+    def reveal_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> Scatter:
+        threshold = _clamp_progress(progress)
+        if self.is_empty:
+            return self
+
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold > 0.0, dtype=bool)
+        else:
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x <= x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x >= x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
+
+        return self.copy_with(x=self.x[mask], y=self.y[mask], size=self.size[mask])
+
+    def hide_by_progress(
+        self,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+        direction: str = "forward",
+    ) -> Scatter:
+        threshold = _clamp_progress(progress)
+        if self.is_empty:
+            return self
+
+        x_min, x_max = _resolve_x_domain(self.x, timeline_domain)
+        if np.isclose(x_min, x_max):
+            mask = np.full(self.x.shape, threshold < 1.0, dtype=bool)
+        else:
+            if direction == "forward":
+                x_threshold = x_min + (x_max - x_min) * threshold
+                mask = self.x > x_threshold
+            elif direction == "backward":
+                x_threshold = x_max - (x_max - x_min) * threshold
+                mask = self.x < x_threshold
+            else:
+                raise ValueError("direction must be 'forward' or 'backward'.")
+
+        return self.copy_with(x=self.x[mask], y=self.y[mask], size=self.size[mask])
+
+
+@dataclass(frozen=True)
 class Text:
     """A single text label in plot coordinates."""
 
@@ -541,6 +717,8 @@ class FillBetweenArea:
     y1: npt.ArrayLike
     y2: npt.ArrayLike | float
     color: str | None = None
+    positive_color: str | None = None
+    negative_color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
@@ -585,6 +763,8 @@ class FillBetweenArea:
         y1: npt.ArrayLike | None = None,
         y2: npt.ArrayLike | float | None = None,
         color: str | None = None,
+        positive_color: str | None = None,
+        negative_color: str | None = None,
         alpha: float | None = None,
         linestyle: str | None = None,
         linewidth: float | None = None,
@@ -598,6 +778,8 @@ class FillBetweenArea:
             y1=self.y1 if y1 is None else y1,
             y2=self.y2 if y2 is None else y2,
             color=self.color if color is None else color,
+            positive_color=self.positive_color if positive_color is None else positive_color,
+            negative_color=self.negative_color if negative_color is None else negative_color,
             alpha=self.alpha if alpha is None else alpha,
             linestyle=self.linestyle if linestyle is None else linestyle,
             linewidth=self.linewidth if linewidth is None else linewidth,
@@ -605,6 +787,35 @@ class FillBetweenArea:
             value_range=self.value_range if value_range is None else value_range,
             fill_kwargs=self.fill_kwargs if fill_kwargs is None else fill_kwargs,
         )
+
+    def fill_segments(
+        self,
+    ) -> list[tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_], dict[str, Any]]]:
+        x_values, y1_values, y2_values, where = self.clipped_fill_data()
+        if not np.any(where):
+            return []
+
+        base_kwargs = self.mpl_fill_kwargs()
+        if self.positive_color is None and self.negative_color is None:
+            return [(x_values, y1_values, y2_values, where, base_kwargs)]
+
+        segments: list[tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_], dict[str, Any]]] = []
+        positive_where = where & (self.y1 >= self.y2)
+        negative_where = where & (self.y1 < self.y2)
+
+        if np.any(positive_where):
+            positive_kwargs = dict(base_kwargs)
+            if self.positive_color is not None:
+                positive_kwargs["color"] = self.positive_color
+            segments.append((x_values, y1_values, y2_values, positive_where, positive_kwargs))
+
+        if np.any(negative_where):
+            negative_kwargs = dict(base_kwargs)
+            if self.negative_color is not None:
+                negative_kwargs["color"] = self.negative_color
+            segments.append((x_values, y1_values, y2_values, negative_where, negative_kwargs))
+
+        return segments
 
     def clipped_fill_data(self) -> tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]]:
         if self.is_empty:
@@ -713,11 +924,13 @@ class Scene:
     """A snapshot of all persistent visual elements after a transition."""
 
     curves: Mapping[str, Curve] = field(default_factory=dict)
+    scatters: Mapping[str, Scatter] = field(default_factory=dict)
     fills: Mapping[str, FillBetweenArea] = field(default_factory=dict)
     texts: Mapping[str, Text] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         normalized_curves: dict[str, Curve] = {}
+        normalized_scatters: dict[str, Scatter] = {}
         normalized_fills: dict[str, FillBetweenArea] = {}
         normalized_texts: dict[str, Text] = {}
 
@@ -725,6 +938,11 @@ class Scene:
             if curve_id != curve.curve_id:
                 raise ValueError("Scene curve keys must match each curve's curve_id.")
             normalized_curves[curve_id] = curve
+
+        for scatter_id, scatter in dict(self.scatters).items():
+            if scatter_id != scatter.scatter_id:
+                raise ValueError("Scene scatter keys must match each scatter's scatter_id.")
+            normalized_scatters[scatter_id] = scatter
 
         for fill_id, fill in dict(self.fills).items():
             if fill_id != fill.fill_id:
@@ -737,15 +955,17 @@ class Scene:
             normalized_texts[text_id] = text
 
         object.__setattr__(self, "curves", normalized_curves)
+        object.__setattr__(self, "scatters", normalized_scatters)
         object.__setattr__(self, "fills", normalized_fills)
         object.__setattr__(self, "texts", normalized_texts)
 
     def __len__(self) -> int:
-        return len(self.curves) + len(self.fills) + len(self.texts)
+        return len(self.curves) + len(self.scatters) + len(self.fills) + len(self.texts)
 
     def contains(self, item_id: str) -> bool:
         return (
             self.contains_curve(item_id)
+            or self.contains_scatter(item_id)
             or self.contains_fill(item_id)
             or self.contains_text(item_id)
         )
@@ -755,6 +975,9 @@ class Scene:
 
     def contains_fill(self, fill_id: str) -> bool:
         return fill_id in self.fills
+
+    def contains_scatter(self, scatter_id: str) -> bool:
+        return scatter_id in self.scatters
 
     def contains_text(self, text_id: str) -> bool:
         return text_id in self.texts
@@ -771,6 +994,12 @@ class Scene:
         except KeyError as exc:
             raise KeyError(f"Fill {fill_id!r} does not exist in the scene.") from exc
 
+    def get_scatter(self, scatter_id: str) -> Scatter:
+        try:
+            return self.scatters[scatter_id]
+        except KeyError as exc:
+            raise KeyError(f"Scatter {scatter_id!r} does not exist in the scene.") from exc
+
     def get_text(self, text_id: str) -> Text:
         try:
             return self.texts[text_id]
@@ -783,7 +1012,7 @@ class Scene:
 
         updated = dict(self.curves)
         updated[curve.curve_id] = curve
-        return Scene(curves=updated, fills=self.fills, texts=self.texts)
+        return Scene(curves=updated, scatters=self.scatters, fills=self.fills, texts=self.texts)
 
     def update_curve(self, curve: Curve) -> Scene:
         if not self.contains_curve(curve.curve_id):
@@ -791,7 +1020,7 @@ class Scene:
 
         updated = dict(self.curves)
         updated[curve.curve_id] = curve
-        return Scene(curves=updated, fills=self.fills, texts=self.texts)
+        return Scene(curves=updated, scatters=self.scatters, fills=self.fills, texts=self.texts)
 
     def remove_curve(self, curve_id: str) -> Scene:
         if not self.contains_curve(curve_id):
@@ -799,7 +1028,31 @@ class Scene:
 
         updated = dict(self.curves)
         updated.pop(curve_id)
-        return Scene(curves=updated, fills=self.fills, texts=self.texts)
+        return Scene(curves=updated, scatters=self.scatters, fills=self.fills, texts=self.texts)
+
+    def add_scatter(self, scatter: Scatter) -> Scene:
+        if self.contains_scatter(scatter.scatter_id):
+            raise ValueError(f"Scatter {scatter.scatter_id!r} already exists in the scene.")
+
+        updated = dict(self.scatters)
+        updated[scatter.scatter_id] = scatter
+        return Scene(curves=self.curves, scatters=updated, fills=self.fills, texts=self.texts)
+
+    def update_scatter(self, scatter: Scatter) -> Scene:
+        if not self.contains_scatter(scatter.scatter_id):
+            raise ValueError(f"Scatter {scatter.scatter_id!r} does not exist in the scene.")
+
+        updated = dict(self.scatters)
+        updated[scatter.scatter_id] = scatter
+        return Scene(curves=self.curves, scatters=updated, fills=self.fills, texts=self.texts)
+
+    def remove_scatter(self, scatter_id: str) -> Scene:
+        if not self.contains_scatter(scatter_id):
+            raise ValueError(f"Scatter {scatter_id!r} does not exist in the scene.")
+
+        updated = dict(self.scatters)
+        updated.pop(scatter_id)
+        return Scene(curves=self.curves, scatters=updated, fills=self.fills, texts=self.texts)
 
     def add_fill(self, fill: FillBetweenArea) -> Scene:
         if self.contains_fill(fill.fill_id):
@@ -807,7 +1060,7 @@ class Scene:
 
         updated = dict(self.fills)
         updated[fill.fill_id] = fill
-        return Scene(curves=self.curves, fills=updated, texts=self.texts)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=updated, texts=self.texts)
 
     def update_fill(self, fill: FillBetweenArea) -> Scene:
         if not self.contains_fill(fill.fill_id):
@@ -815,7 +1068,7 @@ class Scene:
 
         updated = dict(self.fills)
         updated[fill.fill_id] = fill
-        return Scene(curves=self.curves, fills=updated, texts=self.texts)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=updated, texts=self.texts)
 
     def remove_fill(self, fill_id: str) -> Scene:
         if not self.contains_fill(fill_id):
@@ -823,7 +1076,7 @@ class Scene:
 
         updated = dict(self.fills)
         updated.pop(fill_id)
-        return Scene(curves=self.curves, fills=updated, texts=self.texts)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=updated, texts=self.texts)
 
     def add_text(self, text: Text) -> Scene:
         if self.contains_text(text.text_id):
@@ -831,7 +1084,7 @@ class Scene:
 
         updated = dict(self.texts)
         updated[text.text_id] = text
-        return Scene(curves=self.curves, fills=self.fills, texts=updated)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=self.fills, texts=updated)
 
     def update_text(self, text: Text) -> Scene:
         if not self.contains_text(text.text_id):
@@ -839,7 +1092,7 @@ class Scene:
 
         updated = dict(self.texts)
         updated[text.text_id] = text
-        return Scene(curves=self.curves, fills=self.fills, texts=updated)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=self.fills, texts=updated)
 
     def remove_text(self, text_id: str) -> Scene:
         if not self.contains_text(text_id):
@@ -847,4 +1100,4 @@ class Scene:
 
         updated = dict(self.texts)
         updated.pop(text_id)
-        return Scene(curves=self.curves, fills=self.fills, texts=updated)
+        return Scene(curves=self.curves, scatters=self.scatters, fills=self.fills, texts=updated)

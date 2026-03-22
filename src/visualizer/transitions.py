@@ -13,6 +13,7 @@ from .scene import (
     Curve,
     FillBetweenArea,
     FloatArray,
+    Scatter,
     Scene,
     Text,
     _clamp_progress,
@@ -42,6 +43,18 @@ def _current_curve_color(curve: Curve) -> Any:
 
 def _current_fill_color(fill: FillBetweenArea) -> Any:
     return fill.mpl_fill_kwargs().get("color", "#1f77b4")
+
+
+def _current_fill_positive_color(fill: FillBetweenArea) -> Any:
+    if fill.positive_color is not None:
+        return fill.positive_color
+    return _current_fill_color(fill)
+
+
+def _current_fill_negative_color(fill: FillBetweenArea) -> Any:
+    if fill.negative_color is not None:
+        return fill.negative_color
+    return _current_fill_color(fill)
 
 
 def _current_curve_alpha(curve: Curve) -> float:
@@ -479,7 +492,7 @@ class DrawTransition(Transition):
         )
         updated = dict(scene.curves)
         updated[self.curve.curve_id] = partial_curve
-        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
+        return Scene(curves=updated, scatters=scene.scatters, fills=scene.fills, texts=scene.texts)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.add_curve(self.curve)
@@ -560,7 +573,7 @@ class DrawTransition(Transition):
         )
         updated = dict(scene.curves)
         updated[self.curve.curve_id] = partial_curve
-        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
+        return Scene(curves=updated, scatters=scene.scatters, fills=scene.fills, texts=scene.texts)
 
 
 @dataclass(frozen=True)
@@ -584,7 +597,7 @@ class FillBetweenTransition(Transition):
         )
         updated = dict(scene.fills)
         updated[self.fill.fill_id] = partial_fill
-        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
+        return Scene(curves=scene.curves, scatters=scene.scatters, fills=updated, texts=scene.texts)
 
     def apply(self, scene: Scene) -> Scene:
         return scene.add_fill(self.fill)
@@ -630,7 +643,77 @@ class FillBetweenTransition(Transition):
         )
         updated = dict(scene.fills)
         updated[self.fill.fill_id] = partial_fill
-        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
+        return Scene(curves=scene.curves, scatters=scene.scatters, fills=updated, texts=scene.texts)
+
+
+@dataclass(frozen=True)
+class DrawScatterTransition(Transition):
+    scatter: Scatter
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        if scene.contains_scatter(self.scatter.scatter_id):
+            raise ValueError(f"Scatter {self.scatter.scatter_id!r} already exists in the scene.")
+
+        partial_scatter = self.scatter.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(None),
+            direction=self.direction,
+        )
+        updated = dict(scene.scatters)
+        updated[self.scatter.scatter_id] = partial_scatter
+        return Scene(curves=scene.curves, scatters=updated, fills=scene.fills, texts=scene.texts)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene.add_scatter(self.scatter)
+
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        return FrameState(
+            scene=self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
+        )
+
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        return self._effective_timeline_domain(None)
+
+    def _effective_timeline_domain(
+        self,
+        external_timeline_domain: tuple[float, float] | None,
+    ) -> tuple[float, float]:
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        if external_timeline_domain is not None:
+            return external_timeline_domain
+        return (float(np.min(self.scatter.x)), float(np.max(self.scatter.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        if scene.contains_scatter(self.scatter.scatter_id):
+            raise ValueError(f"Scatter {self.scatter.scatter_id!r} already exists in the scene.")
+
+        partial_scatter = self.scatter.reveal_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=self._effective_timeline_domain(timeline_domain),
+            direction=self.direction,
+        )
+        updated = dict(scene.scatters)
+        updated[self.scatter.scatter_id] = partial_scatter
+        return Scene(curves=scene.curves, scatters=updated, fills=scene.fills, texts=scene.texts)
 
 
 @dataclass(frozen=True)
@@ -684,7 +767,61 @@ class EraseTransition(Transition):
             timeline_domain=effective_domain,
             direction=self.direction,
         )
-        return Scene(curves=updated, fills=scene.fills, texts=scene.texts)
+        return Scene(curves=updated, scatters=scene.scatters, fills=scene.fills, texts=scene.texts)
+
+
+@dataclass(frozen=True)
+class EraseScatterTransition(Transition):
+    scatter_id: str
+    direction: str = "forward"
+    timeline_domain: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _validate_direction(self.direction))
+        object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        return self._interpolated_scene(scene, progress, timeline_domain=None)
+
+    def apply(self, scene: Scene) -> Scene:
+        return scene.remove_scatter(self.scatter_id)
+
+    def frame_state(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None = None,
+    ) -> FrameState:
+        return FrameState(
+            scene=self._interpolated_scene(scene, progress, timeline_domain=timeline_domain)
+        )
+
+    def _timeline_domain(self, scene: Scene) -> tuple[float, float]:
+        scatter = scene.get_scatter(self.scatter_id)
+        if self.timeline_domain is not None:
+            return self.timeline_domain
+        return (float(np.min(scatter.x)), float(np.max(scatter.x)))
+
+    def _interpolated_scene(
+        self,
+        scene: Scene,
+        progress: float,
+        *,
+        timeline_domain: tuple[float, float] | None,
+    ) -> Scene:
+        scatter = scene.get_scatter(self.scatter_id)
+        effective_domain = self.timeline_domain or timeline_domain or (
+            float(np.min(scatter.x)),
+            float(np.max(scatter.x)),
+        )
+        updated = dict(scene.scatters)
+        updated[self.scatter_id] = scatter.hide_by_progress(
+            _clamp_progress(progress),
+            timeline_domain=effective_domain,
+            direction=self.direction,
+        )
+        return Scene(curves=scene.curves, scatters=updated, fills=scene.fills, texts=scene.texts)
 
 
 @dataclass(frozen=True)
@@ -738,7 +875,7 @@ class EraseFillBetweenTransition(Transition):
             timeline_domain=effective_domain,
             direction=self.direction,
         )
-        return Scene(curves=scene.curves, fills=updated, texts=scene.texts)
+        return Scene(curves=scene.curves, scatters=scene.scatters, fills=updated, texts=scene.texts)
 
 
 @dataclass(frozen=True, init=False)
@@ -898,12 +1035,208 @@ class MoveTransition(Transition):
 
 
 @dataclass(frozen=True, init=False)
+class MoveScatterTransition(Transition):
+    scatter_id: str
+    newx: npt.ArrayLike | None = None
+    newy: npt.ArrayLike | None = None
+    color: Any | None = None
+    alpha: float | None = None
+    marker: Any | None = None
+    size: npt.ArrayLike | float | None = None
+    linewidth: float | None = None
+    edgecolor: Any | None = None
+    domain: Bounds | None = None
+    value_range: Bounds | None = None
+    scatter_kwargs: Mapping[str, Any] | None = field(default=None)
+
+    def __init__(
+        self,
+        scatter_id: str,
+        newx: npt.ArrayLike | None = None,
+        newy: npt.ArrayLike | None = None,
+        *,
+        x_prime: npt.ArrayLike | None = None,
+        y_prime: npt.ArrayLike | None = None,
+        color: Any | None = None,
+        alpha: float | None = None,
+        marker: Any | None = None,
+        size: npt.ArrayLike | float | None = None,
+        linewidth: float | None = None,
+        edgecolor: Any | None = None,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+        scatter_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        if newx is not None and x_prime is not None:
+            raise ValueError("newx and x_prime cannot both be provided.")
+        if newy is not None and y_prime is not None:
+            raise ValueError("newy and y_prime cannot both be provided.")
+
+        object.__setattr__(self, "scatter_id", scatter_id)
+        object.__setattr__(self, "newx", x_prime if newx is None else newx)
+        object.__setattr__(self, "newy", y_prime if newy is None else newy)
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "alpha", alpha)
+        object.__setattr__(self, "marker", marker)
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "linewidth", linewidth)
+        object.__setattr__(self, "edgecolor", edgecolor)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "value_range", value_range)
+        object.__setattr__(self, "scatter_kwargs", scatter_kwargs)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        if self.newy is None:
+            raise TypeError("MoveScatterTransition requires newy.")
+
+        newy = _coerce_coordinate_array(self.newy, "newy")
+        newx = None
+        if self.newx is not None:
+            newx = _coerce_coordinate_array(self.newx, "newx")
+        if newx is not None and newx.shape != newy.shape:
+            raise ValueError("newx and newy must have the same shape.")
+
+        size = None
+        if self.size is not None:
+            size = _coerce_matching_coordinate_array(self.size, "size", newy.shape)
+            if np.any(size < 0.0):
+                raise ValueError("size must be non-negative.")
+
+        if self.linewidth is not None and self.linewidth < 0:
+            raise ValueError("linewidth must be non-negative.")
+
+        object.__setattr__(self, "newx", newx)
+        object.__setattr__(self, "newy", newy)
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "alpha", _validate_alpha(self.alpha))
+        object.__setattr__(self, "domain", _normalize_timeline_domain(self.domain))
+        object.__setattr__(self, "value_range", _normalize_timeline_domain(self.value_range))
+        if self.scatter_kwargs is not None:
+            object.__setattr__(self, "scatter_kwargs", dict(self.scatter_kwargs))
+
+    def interpolate(self, scene: Scene, progress: float) -> Scene:
+        source_scatter = scene.get_scatter(self.scatter_id)
+        newx = self._effective_newx(source_scatter)
+        newsize = self._effective_size(source_scatter)
+        self._validate_source_shape(source_scatter, newx, newsize)
+
+        t = _clamp_progress(progress)
+        x_values = source_scatter.x + (newx - source_scatter.x) * t
+        y_values = source_scatter.y + (self.newy - source_scatter.y) * t
+        size_values = source_scatter.size + (newsize - source_scatter.size) * t
+
+        return scene.update_scatter(
+            self._updated_scatter(
+                source_scatter,
+                x_values,
+                y_values,
+                size_values,
+                domain=self._interpolated_domain(source_scatter, t),
+                value_range=self._interpolated_value_range(source_scatter, t),
+            )
+        )
+
+    def apply(self, scene: Scene) -> Scene:
+        source_scatter = scene.get_scatter(self.scatter_id)
+        newx = self._effective_newx(source_scatter)
+        newsize = self._effective_size(source_scatter)
+        self._validate_source_shape(source_scatter, newx, newsize)
+
+        return scene.update_scatter(
+            self._updated_scatter(
+                source_scatter,
+                newx,
+                self.newy,
+                newsize,
+                domain=self.domain,
+                value_range=self.value_range,
+            )
+        )
+
+    def _updated_scatter(
+        self,
+        source_scatter: Scatter,
+        x_values: npt.ArrayLike,
+        y_values: npt.ArrayLike,
+        size_values: npt.ArrayLike,
+        *,
+        domain: Bounds | None = None,
+        value_range: Bounds | None = None,
+    ) -> Scatter:
+        return source_scatter.copy_with(
+            x=x_values,
+            y=y_values,
+            color=self.color,
+            alpha=self.alpha,
+            marker=self.marker,
+            size=size_values,
+            linewidth=self.linewidth,
+            edgecolor=self.edgecolor,
+            domain=domain,
+            value_range=value_range,
+            scatter_kwargs=source_scatter.scatter_kwargs if self.scatter_kwargs is None else self.scatter_kwargs,
+        )
+
+    def _effective_newx(self, source_scatter: Scatter) -> FloatArray:
+        if self.newx is None:
+            return source_scatter.x
+        return self.newx
+
+    def _effective_size(self, source_scatter: Scatter) -> FloatArray:
+        if self.size is None:
+            return source_scatter.size
+        return self.size
+
+    def _interpolated_domain(self, source_scatter: Scatter, progress: float) -> Bounds | None:
+        if self.domain is None:
+            return source_scatter.domain
+
+        start_bounds = source_scatter.domain or self._scatter_x_extent(source_scatter)
+        return _interpolate_bounds(start_bounds, self.domain, progress)
+
+    def _interpolated_value_range(
+        self,
+        source_scatter: Scatter,
+        progress: float,
+    ) -> Bounds | None:
+        if self.value_range is None:
+            return source_scatter.value_range
+
+        start_bounds = source_scatter.value_range or self._scatter_y_extent(source_scatter)
+        return _interpolate_bounds(start_bounds, self.value_range, progress)
+
+    def _scatter_x_extent(self, scatter: Scatter) -> Bounds:
+        return (float(np.min(scatter.x)), float(np.max(scatter.x)))
+
+    def _scatter_y_extent(self, scatter: Scatter) -> Bounds:
+        return (float(np.min(scatter.y)), float(np.max(scatter.y)))
+
+    def _validate_source_shape(
+        self,
+        source_scatter: Scatter,
+        newx: FloatArray,
+        newsize: FloatArray,
+    ) -> None:
+        if (
+            source_scatter.x.shape != newx.shape
+            or source_scatter.x.shape != self.newy.shape
+            or source_scatter.x.shape != newsize.shape
+        ):
+            raise ValueError(
+                "MoveScatterTransition requires newx, newy, and size to match the source scatter shape."
+            )
+
+
+@dataclass(frozen=True, init=False)
 class MoveFillBetweenTransition(Transition):
     fill_id: str
     newx: npt.ArrayLike | None = None
     newy1: npt.ArrayLike | None = None
     newy2: npt.ArrayLike | float | None = None
     color: str | None = None
+    positive_color: str | None = None
+    negative_color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
@@ -922,6 +1255,8 @@ class MoveFillBetweenTransition(Transition):
         y1_prime: npt.ArrayLike | None = None,
         y2_prime: npt.ArrayLike | float | None = None,
         color: str | None = None,
+        positive_color: str | None = None,
+        negative_color: str | None = None,
         alpha: float | None = None,
         linestyle: str | None = None,
         linewidth: float | None = None,
@@ -941,6 +1276,8 @@ class MoveFillBetweenTransition(Transition):
         object.__setattr__(self, "newy1", y1_prime if newy1 is None else newy1)
         object.__setattr__(self, "newy2", y2_prime if newy2 is None else newy2)
         object.__setattr__(self, "color", color)
+        object.__setattr__(self, "positive_color", positive_color)
+        object.__setattr__(self, "negative_color", negative_color)
         object.__setattr__(self, "alpha", alpha)
         object.__setattr__(self, "linestyle", linestyle)
         object.__setattr__(self, "linewidth", linewidth)
@@ -1023,6 +1360,8 @@ class MoveFillBetweenTransition(Transition):
             y1=y1_values,
             y2=y2_values,
             color=self.color,
+            positive_color=self.positive_color,
+            negative_color=self.negative_color,
             alpha=self.alpha,
             linestyle=self.linestyle,
             linewidth=self.linewidth,
@@ -1142,6 +1481,8 @@ class CurveStyleTransition(Transition):
 class FillStyleTransition(Transition):
     fill_id: str
     color: str | None = None
+    positive_color: str | None = None
+    negative_color: str | None = None
     alpha: float | None = None
     linestyle: str | None = None
     linewidth: float | None = None
@@ -1167,6 +1508,22 @@ class FillStyleTransition(Transition):
                 else fill.color
             )
 
+        positive_color = fill.positive_color
+        if self.positive_color is not None:
+            positive_color = (
+                _interpolate_color(_current_fill_positive_color(fill), self.positive_color, t)
+                if self.interpolate_color
+                else fill.positive_color
+            )
+
+        negative_color = fill.negative_color
+        if self.negative_color is not None:
+            negative_color = (
+                _interpolate_color(_current_fill_negative_color(fill), self.negative_color, t)
+                if self.interpolate_color
+                else fill.negative_color
+            )
+
         alpha = fill.alpha
         if self.alpha is not None:
             alpha = _interpolate_float(_current_fill_alpha(fill), self.alpha, t)
@@ -1177,6 +1534,8 @@ class FillStyleTransition(Transition):
 
         updated_fill = fill.copy_with(
             color=color,
+            positive_color=positive_color,
+            negative_color=negative_color,
             alpha=alpha,
             linewidth=linewidth,
         )
@@ -1186,6 +1545,8 @@ class FillStyleTransition(Transition):
         fill = scene.get_fill(self.fill_id)
         updated_fill = fill.copy_with(
             color=self.color,
+            positive_color=self.positive_color,
+            negative_color=self.negative_color,
             alpha=self.alpha,
             linestyle=self.linestyle,
             linewidth=self.linewidth,
@@ -1829,10 +2190,13 @@ Parallel = ParallelTransition
 Draw = DrawTransition
 DrawText = DrawTextTransition
 FillBetween = FillBetweenTransition
+DrawScatter = DrawScatterTransition
 Erase = EraseTransition
+EraseScatter = EraseScatterTransition
 EraseFillBetween = EraseFillBetweenTransition
 EraseText = EraseTextTransition
 Move = MoveTransition
+MoveScatter = MoveScatterTransition
 MoveFillBetween = MoveFillBetweenTransition
 MoveText = MoveTextTransition
 CurveStyle = CurveStyleTransition

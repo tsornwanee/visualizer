@@ -8,3 +8,5 @@ dist/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+notebooks/outputs/
+notebooks/__pycache__/

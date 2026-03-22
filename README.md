@@ -4,7 +4,7 @@
 
 The library models animation as:
 
-- `Scene`: the persistent state of curves, filled regions, and text
+- `Scene`: the persistent state of curves, scatter layers, filled regions, and text
 - `Transition`: a time-dependent change from one scene to the next
 - `Schedule`: a sequence of timed transitions compiled into a `FuncAnimation`
 
@@ -14,7 +14,9 @@ Curves, fills, and text can use arbitrary finite plot coordinates.
 
 - draw, move, erase, and pause transitions
 - erase transitions for `fill_between` regions
+- scatter layers with draw, move, and erase transitions
 - `fill_between` creation and movement
+- signed `fill_between` support with separate positive and negative colors
 - text labels with draw, move, style, and erase transitions
 - concurrent transitions with `Parallel`
 - style changes for color, alpha, linewidth, and linestyle
@@ -23,6 +25,7 @@ Curves, fills, and text can use arbitrary finite plot coordinates.
 - act-based composition via `final_scene`, `next_act()`, and `Schedule.combine(...)`
 - automatic axis fitting for arbitrary coordinate ranges
 - per-curve and per-fill clipping windows via `domain` and `value_range`
+- static plotting helpers via `plot_scene(...)` and `schedule.plot_scene(...)`
 
 ## Installation
 
@@ -89,10 +92,12 @@ anim = schedule.build_animation()
 Start from a pre-drawn scene:
 
 ```python
-from visualizer import Curve, Scene, Schedule
+from visualizer import Curve, Scatter, Scene, Schedule
 
-initial_scene = Scene().add_curve(
-    Curve("reference", x, 0.2 + 0.3 * x, color="#94a3b8", linestyle="--")
+initial_scene = (
+    Scene()
+    .add_curve(Curve("reference", x, 0.2 + 0.3 * x, color="#94a3b8", linestyle="--"))
+    .add_scatter(Scatter("markers", [0.2, 0.5], [0.3, 0.55], color="#0f172a", marker="o"))
 )
 schedule = Schedule(initial_scene=initial_scene)
 ```
@@ -140,6 +145,53 @@ schedule.add(
 schedule.add(
     MoveText("label", newx=0.65, newy=0.55, color="#dc2626", rotation=-12),
     duration=0.8,
+)
+```
+
+Use signed fills for gain/loss regions:
+
+```python
+from visualizer import FillBetween, FillBetweenArea
+
+schedule.add(
+    FillBetween(
+        FillBetweenArea(
+            "deviation",
+            x,
+            gain_curve,
+            benchmark,
+            color="#d1d5db",
+            positive_color="#22c55e",
+            negative_color="#ef4444",
+            alpha=0.35,
+            linewidth=0.0,
+        )
+    ),
+    duration=1.0,
+)
+```
+
+Move one scatter layer instead of many one-point marker curves:
+
+```python
+from visualizer import DrawScatter, MoveScatter, Scatter
+
+schedule.add(
+    DrawScatter(
+        Scatter(
+            "banks",
+            initial_budgets,
+            initial_rows,
+            color="#dc2626",
+            marker=7,
+            size=90.0,
+        )
+    ),
+    duration=0.0,
+)
+schedule.add(
+    MoveScatter("banks", newx=target_budgets, newy=initial_rows),
+    duration=1.0,
 )
 ```
 
@@ -202,6 +254,23 @@ anim = schedule.build_animation(fig=fig, ax=ax, xlim=(-0.2, 1.2), ylim=(-0.2, 1.
 
 If you omit `xlim` and `ylim`, the animation now auto-fits to the data range of the curves, fills, and text anchors in the schedule.
 
+Plot a static scene:
+
+```python
+from visualizer import plot_scene
+
+scene = schedule.scene_at(1.2)
+fig, ax = plot_scene(scene, title="Scene at t = 1.2")
+```
+
+Or directly from the schedule:
+
+```python
+fig, ax = schedule.plot_scene(1.2, title="Scene at t = 1.2")
+# or the final scene
+fig, ax = schedule.plot_scene(title="Final scene")
+```
+
 Clip a curve or fill to a specific plotting window:
 
 ```python
@@ -231,7 +300,9 @@ For lines, geometry outside the window is hidden and the visible parts are split
 
 ## Notebook Demos
 
-- [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): basic drawing, styling, clipping, modular scheduling, and combined-transition examples
+- [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): local repo version with basic drawing, styling, clipping, modular scheduling, and combined-transition examples
+- [`notebooks/basic_demo_colab.ipynb`](notebooks/basic_demo_colab.ipynb): Colab-ready version that installs the package from GitHub in the setup cell
+- [`notebooks/tieredremuneration.ipynb`](notebooks/tieredremuneration.ipynb): cleaned five-act notebook that uses [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) for the narrative animation and exports per-act plus combined video artifacts
 
 ## Publishing
 

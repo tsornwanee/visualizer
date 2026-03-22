@@ -1,17 +1,21 @@
 __version__ = "0.1.0"
 
-from .scene import Curve, FillBetweenArea, Scene, Text
-from .schedule import Schedule
+from .scene import Curve, FillBetweenArea, Scatter, Scene, Text
+from .schedule import Schedule, plot_scene
 from .transitions import (
     CurveStyle,
     CurveStyleTransition,
     Draw,
+    DrawScatter,
+    DrawScatterTransition,
     DrawText,
     DrawTextTransition,
     DrawTransition,
     Erase,
     EraseFillBetween,
     EraseFillBetweenTransition,
+    EraseScatter,
+    EraseScatterTransition,
     EraseText,
     EraseTextTransition,
     EraseTransition,
@@ -26,6 +30,8 @@ from .transitions import (
     Move,
     MoveFillBetween,
     MoveFillBetweenTransition,
+    MoveScatter,
+    MoveScatterTransition,
     MoveText,
     MoveTextTransition,
     MoveTransition,
@@ -45,12 +51,16 @@ __all__ = [
     "CurveStyle",
     "CurveStyleTransition",
     "Draw",
+    "DrawScatter",
+    "DrawScatterTransition",
     "DrawText",
     "DrawTextTransition",
     "DrawTransition",
     "Erase",
     "EraseFillBetween",
     "EraseFillBetweenTransition",
+    "EraseScatter",
+    "EraseScatterTransition",
     "EraseText",
     "EraseTextTransition",
     "EraseTransition",
@@ -66,6 +76,8 @@ __all__ = [
     "Move",
     "MoveFillBetween",
     "MoveFillBetweenTransition",
+    "MoveScatter",
+    "MoveScatterTransition",
     "MoveText",
     "MoveTextTransition",
     "MoveTransition",
@@ -73,6 +85,7 @@ __all__ = [
     "PauseTransition",
     "Parallel",
     "ParallelTransition",
+    "Scatter",
     "Scene",
     "Schedule",
     "Stress",
@@ -82,4 +95,5 @@ __all__ = [
     "TextStyleTransition",
     "Transition",
     "__version__",
+    "plot_scene",
 ]
