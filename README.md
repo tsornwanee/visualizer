@@ -298,11 +298,48 @@ fill = FillBetweenArea(
 
 For lines, geometry outside the window is hidden and the visible parts are split into separate segments. For fills, `x` is masked by `domain` and `y` values are clipped into `value_range`.
 
+## Instruction Pipeline
+
+The library now includes lightweight handoff objects for multi-stage visualization design:
+
+- `VisualizationInstructionPacket`: structured requirements for what the visualization should show
+- `NarrativeBrief`: the planner agent's natural-language description of the story and numeric goals
+- `BuilderHandoff`: the packet + brief passed to the builder
+- `VisualizationPipeline`: a small orchestrator that runs `packet -> brief -> build`
+
+Tiered remuneration uses that pattern in [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) with:
+
+- `TieredRemunerationSpec`
+- `build_tiered_remuneration_packet(...)`
+- `write_tiered_remuneration_brief(...)`
+- `build_tiered_remuneration_artifact(...)`
+
+Example:
+
+```python
+from tieredremuneration_support import (
+    TieredRemunerationSpec,
+    build_tiered_remuneration_artifact,
+    build_tiered_remuneration_packet,
+    write_tiered_remuneration_brief,
+)
+
+spec = TieredRemunerationSpec()
+packet = build_tiered_remuneration_packet(spec)
+brief = write_tiered_remuneration_brief(packet)
+artifact = build_tiered_remuneration_artifact(spec, sample_step=12)
+
+print(packet.to_markdown())
+print(brief.as_text())
+bundle = artifact.bundle
+```
+
 ## Notebook Demos
 
 - [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): local repo version with basic drawing, styling, clipping, modular scheduling, and combined-transition examples
 - [`notebooks/basic_demo_colab.ipynb`](notebooks/basic_demo_colab.ipynb): Colab-ready version that installs the package from GitHub in the setup cell
-- [`notebooks/tieredremuneration.ipynb`](notebooks/tieredremuneration.ipynb): cleaned five-act notebook that uses [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) for the narrative animation and exports per-act plus combined video artifacts
+- [`notebooks/tieredremuneration.ipynb`](notebooks/tieredremuneration.ipynb): cleaned five-act notebook that uses [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) for the narrative animation; it previews acts at a low HTML frame rate and exports per-act plus combined MP4 artifacts at a higher video frame rate
+- [`notebooks/tieredremuneration_pipeline_demo.py`](notebooks/tieredremuneration_pipeline_demo.py): script that shows the `spec -> packet -> brief -> artifact` flow directly
 
 ## Publishing
 

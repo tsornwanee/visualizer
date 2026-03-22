@@ -1,5 +1,18 @@
 __version__ = "0.1.0"
 
+from .instructions import (
+    BuilderHandoff,
+    CurveInstruction,
+    IntersectionInstruction,
+    LevelInstruction,
+    NarrativeBeatInstruction,
+    NarrativeBrief,
+    VisualizationBuildArtifact,
+    VisualizationBuilder,
+    VisualizationInstructionPacket,
+    VisualizationPipeline,
+    export_instruction_prompts,
+)
 from .scene import Curve, FillBetweenArea, Scatter, Scene, Text
 from .schedule import Schedule, plot_scene
 from .transitions import (
@@ -47,7 +60,9 @@ from .transitions import (
 )
 
 __all__ = [
+    "BuilderHandoff",
     "Curve",
+    "CurveInstruction",
     "CurveStyle",
     "CurveStyleTransition",
     "Draw",
@@ -73,6 +88,8 @@ __all__ = [
     "JitterFillBetween",
     "JitterFillBetweenTransition",
     "JitterTransition",
+    "IntersectionInstruction",
+    "LevelInstruction",
     "Move",
     "MoveFillBetween",
     "MoveFillBetweenTransition",
@@ -85,6 +102,8 @@ __all__ = [
     "PauseTransition",
     "Parallel",
     "ParallelTransition",
+    "NarrativeBeatInstruction",
+    "NarrativeBrief",
     "Scatter",
     "Scene",
     "Schedule",
@@ -94,6 +113,11 @@ __all__ = [
     "TextStyle",
     "TextStyleTransition",
     "Transition",
+    "VisualizationBuildArtifact",
+    "VisualizationBuilder",
+    "VisualizationInstructionPacket",
+    "VisualizationPipeline",
     "__version__",
+    "export_instruction_prompts",
     "plot_scene",
 ]

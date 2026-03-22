@@ -8,13 +8,24 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.artist import Artist
 from matplotlib.axes import Axes
-from matplotlib.collections import PathCollection, PolyCollection
+from matplotlib.collections import FillBetweenPolyCollection, PathCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.text import Text as MplText
 
 from .scene import Curve, FillBetweenArea, Scatter, Scene, Text
 from .transitions import FrameState, PauseTransition, Transition
+
+
+_EMPTY_FLOAT_ARRAY = np.asarray([], dtype=float)
+_EMPTY_BOOL_ARRAY = np.asarray([], dtype=bool)
+_EMPTY_OFFSETS = np.empty((0, 2), dtype=float)
+
+
+@dataclass
+class _ScatterArtistState:
+    collection: PathCollection
+    marker: object
 
 
 def plot_scene(
@@ -303,21 +314,31 @@ class Schedule:
         ax.set_ylim(*resolved_ylim)
         if title is not None:
             ax.set_title(title)
+        ax.set_autoscale_on(False)
 
         lines: dict[str, Line2D] = {}
         for curve_id, curve in curve_templates.items():
             (line,) = ax.plot([], [], **curve.mpl_line_kwargs())
             line.set_label(curve_id)
+            line.set_animated(blit)
             line.set_visible(False)
             lines[curve_id] = line
 
-        scatters: dict[str, PathCollection | None] = {
-            scatter_id: None for scatter_id in scatter_templates
+        scatters: dict[str, _ScatterArtistState] = {
+            scatter_id: _create_scatter_artist_state(ax, scatter, animated=blit)
+            for scatter_id, scatter in scatter_templates.items()
         }
-        fills: dict[str, list[PolyCollection]] = {fill_id: [] for fill_id in fill_templates}
+        fills: dict[str, dict[str, FillBetweenPolyCollection]] = {
+            fill_id: {
+                variant: _create_fill_artist(ax, animated=blit)
+                for variant in ("base", "positive", "negative")
+            }
+            for fill_id in fill_templates
+        }
         texts: dict[str, MplText] = {}
         for text_id in text_templates:
             artist = ax.text(0.0, 0.0, "")
+            artist.set_animated(blit)
             artist.set_visible(False)
             texts[text_id] = artist
         pointer_artists: list[Line2D] = []
@@ -346,44 +367,29 @@ class Schedule:
                     line.set_visible(False)
                 artists.append(line)
 
-            for fill_id, collection in fills.items():
-                for artist in collection:
-                    artist.remove()
-                fills[fill_id] = []
-
+            for fill_id, variant_artists in fills.items():
                 if frame_state.scene.contains_fill(fill_id):
                     fill = frame_state.scene.get_fill(fill_id)
-                    if not fill.is_empty:
-                        for x_values, y1_values, y2_values, where, fill_kwargs in fill.fill_segments():
-                            collection = ax.fill_between(
-                                x_values,
-                                y1_values,
-                                y2_values,
-                                where=where,
-                                interpolate=True,
-                                **fill_kwargs,
-                            )
-                            fills[fill_id].append(collection)
-                            artists.append(collection)
+                    payloads = _fill_artist_payloads(fill)
+                else:
+                    payloads = {}
 
-            for scatter_id, collection in scatters.items():
-                if collection is not None:
-                    collection.remove()
-                    scatters[scatter_id] = None
+                for variant, artist in variant_artists.items():
+                    _update_fill_artist(artist, payloads.get(variant))
+                    artists.append(artist)
 
+            for scatter_id, state in scatters.items():
                 if frame_state.scene.contains_scatter(scatter_id):
                     scatter = frame_state.scene.get_scatter(scatter_id)
-                    if scatter.is_empty:
-                        continue
-                    x_values, y_values, sizes = scatter.clipped_scatter_data()
-                    if x_values.size == 0:
-                        continue
-                    scatters[scatter_id] = ax.scatter(
-                        x_values,
-                        y_values,
-                        **scatter.mpl_scatter_kwargs(size=sizes),
+                    scatters[scatter_id] = _update_scatter_artist(
+                        ax,
+                        state,
+                        scatter,
+                        animated=blit,
                     )
-                    artists.append(scatters[scatter_id])
+                else:
+                    _hide_scatter_artist(state.collection)
+                artists.append(scatters[scatter_id].collection)
 
             for text_id, artist in texts.items():
                 if frame_state.scene.contains_text(text_id):
@@ -399,27 +405,43 @@ class Schedule:
                     artist.set_visible(False)
                 artists.append(artist)
 
-            while pointer_artists:
-                pointer_artists.pop().remove()
-            for pointer in frame_state.pointers:
+            _ensure_line_artist_count(
+                ax,
+                pointer_artists,
+                len(frame_state.pointers),
+                animated=blit,
+            )
+            for index, pointer in enumerate(frame_state.pointers):
                 pointer_kwargs = {
                     "marker": "o",
                     "linestyle": "None",
                 }
                 pointer_kwargs.update(pointer.artist_kwargs)
-                (artist,) = ax.plot(
-                    [pointer.x],
-                    [pointer.y],
-                    **pointer_kwargs,
-                )
-                pointer_artists.append(artist)
+                artist = pointer_artists[index]
+                artist.set_data([pointer.x], [pointer.y])
+                artist.set(**pointer_kwargs)
+                artist.set_visible(True)
+                artists.append(artist)
+            for artist in pointer_artists[len(frame_state.pointers) :]:
+                artist.set_data([], [])
+                artist.set_visible(False)
                 artists.append(artist)
 
-            while glow_artists:
-                glow_artists.pop().remove()
-            for glow in frame_state.glows:
-                (artist,) = ax.plot(glow.x, glow.y, **glow.artist_kwargs)
-                glow_artists.append(artist)
+            _ensure_line_artist_count(
+                ax,
+                glow_artists,
+                len(frame_state.glows),
+                animated=blit,
+            )
+            for index, glow in enumerate(frame_state.glows):
+                artist = glow_artists[index]
+                artist.set_data(glow.x, glow.y)
+                artist.set(**glow.artist_kwargs)
+                artist.set_visible(True)
+                artists.append(artist)
+            for artist in glow_artists[len(frame_state.glows) :]:
+                artist.set_data([], [])
+                artist.set_visible(False)
                 artists.append(artist)
 
             return artists
@@ -445,6 +467,7 @@ class Schedule:
             interval=1000 / fps,
             blit=blit,
             repeat=repeat,
+            cache_frame_data=False,
         )
 
     def _prepare(self) -> list[_PreparedTransition]:
@@ -632,6 +655,225 @@ def _infer_axis_limits_for_templates(
 
     padding = (maximum - minimum) * 0.05
     return (minimum - padding, maximum + padding)
+
+
+def _create_fill_artist(
+    ax: Axes,
+    *,
+    animated: bool,
+) -> FillBetweenPolyCollection:
+    artist = FillBetweenPolyCollection(
+        "x",
+        _EMPTY_FLOAT_ARRAY,
+        _EMPTY_FLOAT_ARRAY,
+        _EMPTY_FLOAT_ARRAY,
+        where=_EMPTY_BOOL_ARRAY,
+        interpolate=True,
+    )
+    artist.set_animated(animated)
+    artist.set_visible(False)
+    ax.add_collection(artist)
+    return artist
+
+
+def _fill_artist_payloads(
+    fill: FillBetweenArea,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, object]]]:
+    x_values, y1_values, y2_values, where = fill.clipped_fill_data()
+    if not np.any(where):
+        return {}
+
+    base_kwargs = fill.mpl_fill_kwargs()
+    if fill.positive_color is None and fill.negative_color is None:
+        return {
+            "base": (
+                x_values,
+                y1_values,
+                y2_values,
+                where,
+                base_kwargs,
+            )
+        }
+
+    payloads: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, object]]] = {}
+    positive_where = where & (fill.y1 >= fill.y2)
+    negative_where = where & (fill.y1 < fill.y2)
+
+    if np.any(positive_where):
+        positive_kwargs = dict(base_kwargs)
+        if fill.positive_color is not None:
+            positive_kwargs["color"] = fill.positive_color
+        payloads["positive"] = (
+            x_values,
+            y1_values,
+            y2_values,
+            positive_where,
+            positive_kwargs,
+        )
+
+    if np.any(negative_where):
+        negative_kwargs = dict(base_kwargs)
+        if fill.negative_color is not None:
+            negative_kwargs["color"] = fill.negative_color
+        payloads["negative"] = (
+            x_values,
+            y1_values,
+            y2_values,
+            negative_where,
+            negative_kwargs,
+        )
+
+    return payloads
+
+
+def _apply_fill_style(
+    artist: FillBetweenPolyCollection,
+    fill_kwargs: Mapping[str, object],
+) -> None:
+    kwargs = dict(fill_kwargs)
+
+    if "alpha" in kwargs:
+        artist.set_alpha(kwargs.pop("alpha"))
+
+    if "color" in kwargs:
+        artist.set_color(kwargs.pop("color"))
+
+    if "facecolor" in kwargs:
+        artist.set_facecolor(kwargs.pop("facecolor"))
+    if "edgecolor" in kwargs:
+        artist.set_edgecolor(kwargs.pop("edgecolor"))
+    if "linewidth" in kwargs:
+        artist.set_linewidth(kwargs.pop("linewidth"))
+    if "linewidths" in kwargs:
+        artist.set_linewidths(kwargs.pop("linewidths"))
+    if "linestyle" in kwargs:
+        artist.set_linestyle(kwargs.pop("linestyle"))
+
+    kwargs.pop("interpolate", None)
+
+    if kwargs:
+        artist.set(**kwargs)
+
+
+def _update_fill_artist(
+    artist: FillBetweenPolyCollection,
+    payload: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, object]] | None,
+) -> None:
+    if payload is None:
+        artist.set_data(
+            _EMPTY_FLOAT_ARRAY,
+            _EMPTY_FLOAT_ARRAY,
+            _EMPTY_FLOAT_ARRAY,
+            where=_EMPTY_BOOL_ARRAY,
+        )
+        artist.set_visible(False)
+        return
+
+    x_values, y1_values, y2_values, where, fill_kwargs = payload
+    artist.set_data(x_values, y1_values, y2_values, where=where)
+    _apply_fill_style(artist, fill_kwargs)
+    artist.set_visible(np.any(where))
+
+
+def _create_scatter_artist_state(
+    ax: Axes,
+    scatter: Scatter,
+    *,
+    animated: bool,
+) -> _ScatterArtistState:
+    marker = scatter.marker
+    collection = ax.scatter(_EMPTY_FLOAT_ARRAY, _EMPTY_FLOAT_ARRAY, marker=marker)
+    collection.set_animated(animated)
+    collection.set_visible(False)
+    return _ScatterArtistState(collection=collection, marker=marker)
+
+
+def _apply_scatter_style(
+    collection: PathCollection,
+    scatter_kwargs: Mapping[str, object],
+) -> None:
+    kwargs = dict(scatter_kwargs)
+
+    if "alpha" in kwargs:
+        collection.set_alpha(kwargs.pop("alpha"))
+
+    if "color" in kwargs:
+        collection.set_color(kwargs.pop("color"))
+    elif "c" in kwargs:
+        collection.set_color(kwargs.pop("c"))
+
+    if "facecolor" in kwargs:
+        collection.set_facecolor(kwargs.pop("facecolor"))
+    if "facecolors" in kwargs:
+        collection.set_facecolors(kwargs.pop("facecolors"))
+    if "edgecolor" in kwargs:
+        collection.set_edgecolor(kwargs.pop("edgecolor"))
+    if "edgecolors" in kwargs:
+        collection.set_edgecolors(kwargs.pop("edgecolors"))
+    if "linewidth" in kwargs:
+        collection.set_linewidth(kwargs.pop("linewidth"))
+    if "linewidths" in kwargs:
+        collection.set_linewidths(kwargs.pop("linewidths"))
+
+    if kwargs:
+        collection.set(**kwargs)
+
+
+def _update_scatter_artist(
+    ax: Axes,
+    state: _ScatterArtistState,
+    scatter: Scatter,
+    *,
+    animated: bool,
+) -> _ScatterArtistState:
+    x_values, y_values, sizes = scatter.clipped_scatter_data()
+    if x_values.size == 0:
+        _hide_scatter_artist(state.collection)
+        return state
+
+    scatter_kwargs = scatter.mpl_scatter_kwargs(size=sizes)
+    marker = scatter_kwargs.pop("marker", scatter.marker)
+    size_values = np.asarray(scatter_kwargs.pop("s", sizes), dtype=float)
+
+    if not _values_equal(state.marker, marker):
+        state.collection.remove()
+        replacement_kwargs = dict(scatter_kwargs)
+        replacement_kwargs["s"] = size_values
+        replacement = ax.scatter(
+            x_values,
+            y_values,
+            marker=marker,
+            **replacement_kwargs,
+        )
+        replacement.set_animated(animated)
+        replacement.set_visible(True)
+        return _ScatterArtistState(collection=replacement, marker=marker)
+
+    state.collection.set_offsets(np.column_stack((x_values, y_values)))
+    state.collection.set_sizes(size_values)
+    _apply_scatter_style(state.collection, scatter_kwargs)
+    state.collection.set_visible(True)
+    return state
+
+
+def _hide_scatter_artist(collection: PathCollection) -> None:
+    collection.set_offsets(_EMPTY_OFFSETS)
+    collection.set_sizes(_EMPTY_FLOAT_ARRAY)
+    collection.set_visible(False)
+
+
+def _ensure_line_artist_count(
+    ax: Axes,
+    artists: list[Line2D],
+    count: int,
+    *,
+    animated: bool,
+) -> None:
+    while len(artists) < count:
+        (artist,) = ax.plot([], [])
+        artist.set_animated(animated)
+        artist.set_visible(False)
+        artists.append(artist)
 
 
 def _scenes_equal(left: Scene, right: Scene) -> bool:

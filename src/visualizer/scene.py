@@ -9,6 +9,7 @@ import numpy.typing as npt
 
 FloatArray = npt.NDArray[np.float64]
 Bounds = tuple[float, float]
+_SCALAR_TOLERANCE = 1e-12
 
 
 def _coerce_coordinate_array(values: npt.ArrayLike, name: str) -> FloatArray:
@@ -91,7 +92,7 @@ def _point_is_visible(
 
 
 def _points_close(x0: float, y0: float, x1: float, y1: float) -> bool:
-    return bool(np.isclose(x0, x1) and np.isclose(y0, y1))
+    return abs(x0 - x1) <= _SCALAR_TOLERANCE and abs(y0 - y1) <= _SCALAR_TOLERANCE
 
 
 def _clip_segment_to_window(
@@ -117,7 +118,7 @@ def _clip_segment_to_window(
         constraints.extend(((-dy, y0 - y_min), (dy, y_max - y0)))
 
     for p_value, q_value in constraints:
-        if np.isclose(p_value, 0.0):
+        if abs(p_value) <= _SCALAR_TOLERANCE:
             if q_value < 0.0:
                 return None
             continue
@@ -151,10 +152,10 @@ def _clip_polyline_to_window(
     value_range: Bounds | None,
 ) -> tuple[FloatArray, FloatArray]:
     if x_values.size == 0:
-        return x_values.copy(), y_values.copy()
+        return x_values, y_values
 
     if domain is None and value_range is None:
-        return x_values.copy(), y_values.copy()
+        return x_values, y_values
 
     if x_values.size == 1:
         if _point_is_visible(
@@ -163,7 +164,7 @@ def _clip_polyline_to_window(
             domain=domain,
             value_range=value_range,
         ):
-            return x_values.copy(), y_values.copy()
+            return x_values, y_values
         return (
             np.asarray([], dtype=float),
             np.asarray([], dtype=float),
@@ -287,6 +288,13 @@ class Curve:
     domain: Bounds | None = None
     value_range: Bounds | None = None
     line_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    _line_style_cache: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
+    _clipped_line_cache: tuple[FloatArray, FloatArray] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         x_array = _coerce_coordinate_array(self.x, "x")
@@ -307,13 +315,19 @@ class Curve:
         return self.x.size == 0
 
     def mpl_line_kwargs(self) -> dict[str, Any]:
-        return _merge_style_kwargs(
-            self.line_kwargs,
-            color=self.color,
-            alpha=self.alpha,
-            linestyle=self.linestyle,
-            linewidth=self.linewidth,
-        )
+        if self._line_style_cache is None:
+            object.__setattr__(
+                self,
+                "_line_style_cache",
+                _merge_style_kwargs(
+                    self.line_kwargs,
+                    color=self.color,
+                    alpha=self.alpha,
+                    linestyle=self.linestyle,
+                    linewidth=self.linewidth,
+                ),
+            )
+        return self._line_style_cache
 
     def copy_with(
         self,
@@ -342,12 +356,18 @@ class Curve:
         )
 
     def clipped_line_data(self) -> tuple[FloatArray, FloatArray]:
-        return _clip_polyline_to_window(
-            self.x,
-            self.y,
-            domain=self.domain,
-            value_range=self.value_range,
-        )
+        if self._clipped_line_cache is None:
+            object.__setattr__(
+                self,
+                "_clipped_line_cache",
+                _clip_polyline_to_window(
+                    self.x,
+                    self.y,
+                    domain=self.domain,
+                    value_range=self.value_range,
+                ),
+            )
+        return self._clipped_line_cache
 
     def point_is_visible(self, x_value: float, y_value: float) -> bool:
         return _point_is_visible(
@@ -452,6 +472,12 @@ class Scatter:
     domain: Bounds | None = None
     value_range: Bounds | None = None
     scatter_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    _clipped_scatter_cache: tuple[FloatArray, FloatArray, FloatArray] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         x_array = _coerce_coordinate_array(self.x, "x")
@@ -527,9 +553,19 @@ class Scatter:
         )
 
     def clipped_scatter_data(self) -> tuple[FloatArray, FloatArray, FloatArray]:
+        if self._clipped_scatter_cache is not None:
+            return self._clipped_scatter_cache
+
         if self.is_empty:
             empty = np.asarray([], dtype=float)
-            return empty, empty, empty
+            result = (empty, empty, empty)
+            object.__setattr__(self, "_clipped_scatter_cache", result)
+            return result
+
+        if self.domain is None and self.value_range is None:
+            result = (self.x, self.y, self.size)
+            object.__setattr__(self, "_clipped_scatter_cache", result)
+            return result
 
         mask = np.ones(self.x.shape, dtype=bool)
         if self.domain is not None:
@@ -537,7 +573,9 @@ class Scatter:
         if self.value_range is not None:
             mask &= (self.y >= self.value_range[0]) & (self.y <= self.value_range[1])
 
-        return self.x[mask], self.y[mask], self.size[mask]
+        result = (self.x[mask], self.y[mask], self.size[mask])
+        object.__setattr__(self, "_clipped_scatter_cache", result)
+        return result
 
     def point_is_visible(self, x_value: float, y_value: float) -> bool:
         return _point_is_visible(
@@ -629,6 +667,7 @@ class Text:
     domain: Bounds | None = None
     value_range: Bounds | None = None
     text_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    _text_style_cache: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         x_value = float(self.x)
@@ -652,15 +691,21 @@ class Text:
         object.__setattr__(self, "text_kwargs", dict(self.text_kwargs))
 
     def mpl_text_kwargs(self) -> dict[str, Any]:
-        return _merge_text_kwargs(
-            self.text_kwargs,
-            color=self.color,
-            alpha=self.alpha,
-            fontsize=self.fontsize,
-            ha=self.ha,
-            va=self.va,
-            rotation=self.rotation,
-        )
+        if self._text_style_cache is None:
+            object.__setattr__(
+                self,
+                "_text_style_cache",
+                _merge_text_kwargs(
+                    self.text_kwargs,
+                    color=self.color,
+                    alpha=self.alpha,
+                    fontsize=self.fontsize,
+                    ha=self.ha,
+                    va=self.va,
+                    rotation=self.rotation,
+                ),
+            )
+        return self._text_style_cache
 
     def copy_with(
         self,
@@ -725,6 +770,13 @@ class FillBetweenArea:
     domain: Bounds | None = None
     value_range: Bounds | None = None
     fill_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    _fill_style_cache: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
+    _clipped_fill_cache: tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         x_array = _coerce_coordinate_array(self.x, "x")
@@ -748,13 +800,19 @@ class FillBetweenArea:
         return self.x.size == 0
 
     def mpl_fill_kwargs(self) -> dict[str, Any]:
-        return _merge_style_kwargs(
-            self.fill_kwargs,
-            color=self.color,
-            alpha=self.alpha,
-            linestyle=self.linestyle,
-            linewidth=self.linewidth,
-        )
+        if self._fill_style_cache is None:
+            object.__setattr__(
+                self,
+                "_fill_style_cache",
+                _merge_style_kwargs(
+                    self.fill_kwargs,
+                    color=self.color,
+                    alpha=self.alpha,
+                    linestyle=self.linestyle,
+                    linewidth=self.linewidth,
+                ),
+            )
+        return self._fill_style_cache
 
     def copy_with(
         self,
@@ -818,21 +876,30 @@ class FillBetweenArea:
         return segments
 
     def clipped_fill_data(self) -> tuple[FloatArray, FloatArray, FloatArray, npt.NDArray[np.bool_]]:
+        if self._clipped_fill_cache is not None:
+            return self._clipped_fill_cache
+
         if self.is_empty:
             empty = np.asarray([], dtype=float)
-            return empty, empty, empty, np.asarray([], dtype=bool)
+            result = (empty, empty, empty, np.asarray([], dtype=bool))
+            object.__setattr__(self, "_clipped_fill_cache", result)
+            return result
 
-        where = np.ones(self.x.shape, dtype=bool)
-        if self.domain is not None:
-            where &= (self.x >= self.domain[0]) & (self.x <= self.domain[1])
+        if self.domain is None:
+            where = np.ones(self.x.shape, dtype=bool)
+        else:
+            where = (self.x >= self.domain[0]) & (self.x <= self.domain[1])
 
-        clipped_y1 = self.y1.copy()
-        clipped_y2 = self.y2.copy()
-        if self.value_range is not None:
-            clipped_y1 = np.clip(clipped_y1, self.value_range[0], self.value_range[1])
-            clipped_y2 = np.clip(clipped_y2, self.value_range[0], self.value_range[1])
+        if self.value_range is None:
+            clipped_y1 = self.y1
+            clipped_y2 = self.y2
+        else:
+            clipped_y1 = np.clip(self.y1, self.value_range[0], self.value_range[1])
+            clipped_y2 = np.clip(self.y2, self.value_range[0], self.value_range[1])
 
-        return self.x.copy(), clipped_y1, clipped_y2, where
+        result = (self.x, clipped_y1, clipped_y2, where)
+        object.__setattr__(self, "_clipped_fill_cache", result)
+        return result
 
     def visible_extents(self) -> tuple[float, float, float, float] | None:
         if self.is_empty:
