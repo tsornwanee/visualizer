@@ -115,6 +115,93 @@ def _validate_direction(direction: str) -> str:
     return direction
 
 
+def _coerce_pause_sequence(
+    values: float | Sequence[float] | npt.NDArray[np.float64] | None,
+    *,
+    name: str,
+) -> list[float]:
+    if values is None:
+        return []
+    return _coerce_component_values(values, name=name)
+
+
+def _normalize_reveal_pauses(
+    pause_at: float | Sequence[float] | npt.NDArray[np.float64] | None,
+    pause_for: float | Sequence[float] | npt.NDArray[np.float64],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    points = _coerce_pause_sequence(pause_at, name="pause_at")
+    durations = _coerce_pause_sequence(pause_for, name="pause_for") if points else []
+
+    if not points:
+        if any(duration != 0.0 for duration in _coerce_pause_sequence(pause_for, name="pause_for")):
+            raise ValueError("pause_for requires pause_at.")
+        return (), ()
+
+    if len(durations) == 1 and len(points) > 1:
+        durations = durations * len(points)
+    if len(durations) != len(points):
+        raise ValueError("pause_for must have length 1 or match pause_at.")
+    if any(point < 0.0 or point > 1.0 for point in points):
+        raise ValueError("pause_at values must lie in [0, 1].")
+    if any(duration < 0.0 for duration in durations):
+        raise ValueError("pause_for values must be non-negative.")
+
+    merged_points: list[float] = []
+    merged_durations: list[float] = []
+    for point, duration in sorted(zip(points, durations), key=lambda pair: pair[0]):
+        if merged_points and np.isclose(merged_points[-1], point):
+            merged_durations[-1] += float(duration)
+            continue
+        merged_points.append(float(point))
+        merged_durations.append(float(duration))
+
+    total_pause = float(sum(merged_durations))
+    if total_pause >= 1.0:
+        raise ValueError("pause_for values must sum to less than 1.0.")
+
+    return tuple(merged_points), tuple(merged_durations)
+
+
+def _apply_reveal_pauses(
+    progress: float,
+    pause_at: Sequence[float],
+    pause_for: Sequence[float],
+) -> float:
+    t = _clamp_progress(progress)
+    if not pause_at:
+        return t
+
+    total_pause = float(sum(pause_for))
+    if np.isclose(total_pause, 0.0):
+        return t
+
+    motion_share = 1.0 - total_pause
+    elapsed_time = 0.0
+    previous_point = 0.0
+
+    for point, hold in zip(pause_at, pause_for):
+        segment_progress = float(point) - previous_point
+        segment_time = motion_share * segment_progress
+
+        if segment_time > 0.0 and t <= elapsed_time + segment_time:
+            local_progress = (t - elapsed_time) / segment_time
+            return previous_point + local_progress * segment_progress
+
+        elapsed_time += max(segment_time, 0.0)
+        if hold > 0.0 and t <= elapsed_time + hold:
+            return float(point)
+
+        elapsed_time += hold
+        previous_point = float(point)
+
+    final_segment_progress = 1.0 - previous_point
+    final_segment_time = motion_share * final_segment_progress
+    if final_segment_time <= 0.0:
+        return 1.0
+    local_progress = (t - elapsed_time) / final_segment_time
+    return _clamp_progress(previous_point + local_progress * final_segment_progress)
+
+
 def _normalize_timeline_domain(
     timeline_domain: tuple[float, float] | None,
 ) -> tuple[float, float] | None:
@@ -475,18 +562,26 @@ class DrawTransition(Transition):
     pointer_kwargs: Mapping[str, Any] = field(default_factory=dict)
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
+    pause_at: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    pause_for: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "pointer_kwargs", dict(self.pointer_kwargs))
         object.__setattr__(self, "direction", _validate_direction(self.direction))
         object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
+        normalized_pause_at, normalized_pause_for = _normalize_reveal_pauses(
+            self.pause_at,
+            self.pause_for,
+        )
+        object.__setattr__(self, "pause_at", normalized_pause_at)
+        object.__setattr__(self, "pause_for", normalized_pause_for)
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         if scene.contains_curve(self.curve.curve_id):
             raise ValueError(f"Curve {self.curve.curve_id!r} already exists in the scene.")
 
         partial_curve = self.curve.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(None),
             direction=self.direction,
         )
@@ -567,7 +662,7 @@ class DrawTransition(Transition):
             raise ValueError(f"Curve {self.curve.curve_id!r} already exists in the scene.")
 
         partial_curve = self.curve.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(timeline_domain),
             direction=self.direction,
         )
@@ -575,23 +670,34 @@ class DrawTransition(Transition):
         updated[self.curve.curve_id] = partial_curve
         return Scene(curves=updated, scatters=scene.scatters, fills=scene.fills, texts=scene.texts)
 
+    def _effective_progress(self, progress: float) -> float:
+        return _apply_reveal_pauses(progress, self.pause_at, self.pause_for)
+
 
 @dataclass(frozen=True)
 class FillBetweenTransition(Transition):
     fill: FillBetweenArea
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
+    pause_at: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    pause_for: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "direction", _validate_direction(self.direction))
         object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
+        normalized_pause_at, normalized_pause_for = _normalize_reveal_pauses(
+            self.pause_at,
+            self.pause_for,
+        )
+        object.__setattr__(self, "pause_at", normalized_pause_at)
+        object.__setattr__(self, "pause_for", normalized_pause_for)
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         if scene.contains_fill(self.fill.fill_id):
             raise ValueError(f"Fill {self.fill.fill_id!r} already exists in the scene.")
 
         partial_fill = self.fill.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(None),
             direction=self.direction,
         )
@@ -637,7 +743,7 @@ class FillBetweenTransition(Transition):
             raise ValueError(f"Fill {self.fill.fill_id!r} already exists in the scene.")
 
         partial_fill = self.fill.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(timeline_domain),
             direction=self.direction,
         )
@@ -645,23 +751,34 @@ class FillBetweenTransition(Transition):
         updated[self.fill.fill_id] = partial_fill
         return Scene(curves=scene.curves, scatters=scene.scatters, fills=updated, texts=scene.texts)
 
+    def _effective_progress(self, progress: float) -> float:
+        return _apply_reveal_pauses(progress, self.pause_at, self.pause_for)
+
 
 @dataclass(frozen=True)
 class DrawScatterTransition(Transition):
     scatter: Scatter
     direction: str = "forward"
     timeline_domain: tuple[float, float] | None = None
+    pause_at: float | Sequence[float] | npt.NDArray[np.float64] | None = None
+    pause_for: float | Sequence[float] | npt.NDArray[np.float64] = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "direction", _validate_direction(self.direction))
         object.__setattr__(self, "timeline_domain", _normalize_timeline_domain(self.timeline_domain))
+        normalized_pause_at, normalized_pause_for = _normalize_reveal_pauses(
+            self.pause_at,
+            self.pause_for,
+        )
+        object.__setattr__(self, "pause_at", normalized_pause_at)
+        object.__setattr__(self, "pause_for", normalized_pause_for)
 
     def interpolate(self, scene: Scene, progress: float) -> Scene:
         if scene.contains_scatter(self.scatter.scatter_id):
             raise ValueError(f"Scatter {self.scatter.scatter_id!r} already exists in the scene.")
 
         partial_scatter = self.scatter.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(None),
             direction=self.direction,
         )
@@ -707,13 +824,16 @@ class DrawScatterTransition(Transition):
             raise ValueError(f"Scatter {self.scatter.scatter_id!r} already exists in the scene.")
 
         partial_scatter = self.scatter.reveal_by_progress(
-            _clamp_progress(progress),
+            self._effective_progress(progress),
             timeline_domain=self._effective_timeline_domain(timeline_domain),
             direction=self.direction,
         )
         updated = dict(scene.scatters)
         updated[self.scatter.scatter_id] = partial_scatter
         return Scene(curves=scene.curves, scatters=updated, fills=scene.fills, texts=scene.texts)
+
+    def _effective_progress(self, progress: float) -> float:
+        return _apply_reveal_pauses(progress, self.pause_at, self.pause_for)
 
 
 @dataclass(frozen=True)

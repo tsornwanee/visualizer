@@ -3,10 +3,17 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import re
 import subprocess
-import textwrap
 
+_MPLCONFIGDIR = Path(__file__).with_name(".mplconfig")
+_MPLCONFIGDIR.mkdir(exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FFMpegWriter
@@ -35,19 +42,6 @@ from visualizer import (
     Stress,
     Text,
     TextStyle,
-    export_instruction_prompts,
-)
-from visualizer.instructions import (
-    BuilderHandoff,
-    CurveInstruction,
-    IntersectionInstruction,
-    LevelInstruction,
-    NarrativeBeatInstruction,
-    NarrativeBrief,
-    VisualizationBuildArtifact,
-    VisualizationBuilder,
-    VisualizationInstructionPacket,
-    VisualizationPipeline,
 )
 from visualizer.schedule import ScheduledTransition
 from visualizer.transitions import ParallelTransition, PauseTransition, StressTransition
@@ -55,12 +49,12 @@ from visualizer.transitions import ParallelTransition, PauseTransition, StressTr
 
 FIGSIZE = (10, 6)
 XLIM = (-0.2, 1.2)
-YLIM = (-0.25, 1.2)
+YLIM = (-0.30, 1.2)
 PREVIEW_FPS = 6
 EXPORT_FPS = 30
 FPS = PREVIEW_FPS
 VIDEO_DPI = 96
-PLOT_RANGE = np.array([-0.08, 1.0], dtype=float)
+PLOT_RANGE = np.array([-0.24, 1.0], dtype=float)
 SAMPLE_BUDGETS = np.linspace(0.04, 0.96, 11)
 DEFAULT_SAMPLE_STEP = 12
 BANK_LANES = np.array([1.14, 1.10, 1.06], dtype=float)
@@ -71,7 +65,6 @@ NARRATION_LAYOUT = {
     "narration1": (-0.16, -0.14),
     "narration2": (-0.06, -0.19),
 }
-FROM_SCRATCH_WORKSPACE_DIR = Path("agent_workspaces") / "tieredremuneration_from_scratch"
 
 
 @dataclass
@@ -134,10 +127,10 @@ class NonMonotoneRhoRecipe:
 
 @dataclass(frozen=True)
 class MonotoneRhoRecipe:
-    start_level: float = 0.16
-    end_level: float = -0.05
-    transition_start: float = 0.10
-    transition_end: float = 0.90
+    start_level: float = 0.24
+    end_level: float = -0.18
+    transition_start: float = 0.18
+    transition_end: float = 0.96
     tilt: float = 0.03
 
 
@@ -157,491 +150,19 @@ class RateBandSpec:
 
 @dataclass(frozen=True)
 class TieredRemunerationSpec:
-    title: str = "Tiered Remuneration"
-    target_audience: str = "technical audience seeing the mechanism for the first time"
-    utility_variable: str = "b"
-    utility_shape: tuple[str, ...] = ("increasing", "concave")
-    utility_guardrail: str = "Only use u to communicate concavity; do not impose extra curvature claims on u'."
-    derivative_shape: tuple[str, ...] = ("positive", "decreasing")
-    rho0_shape: tuple[str, ...] = ("non-monotone",)
-    rho1_shape: tuple[str, ...] = ("monotone",)
     rates: RateBandSpec = RateBandSpec()
     rho0_crossings_upper: int = 3
     rho0_crossings_lower: int = 3
     rho1_cutoff_targets: tuple[float, float] = (0.30, 0.70)
     initial_budget_x: float = 0.565
+    borrow_demo_start_x: float = 0.46
+    borrow_demo_near_x: float = 0.54
+    borrow_demo_far_x: float = 0.76
+    lend_demo_start_x: float = 0.78
+    lend_demo_near_x: float = 0.66
+    lend_demo_far_x: float = 0.44
     target_cutoff_pair: tuple[float, float] = (0.405, 0.500)
-    pacing: str = "slow"
-    story_beats: tuple[str, ...] = (
-        "Introduce u on its own.",
-        "Move to u' and add the friction band.",
-        "Use a non-monotone rho to create multiple deviation incentives.",
-        "Contrast with a monotone rho.",
-    )
-    animation_directives: tuple[str, ...] = (
-        "Start with a quiet single-curve view of u(b), then pause long enough for the audience to read that u is increasing and concave.",
-        "When moving from u to u'(b), make the change spatially obvious: keep u as a temporary reference in the upper panel, then expand u' back to the main panel.",
-        "Show friction by comparing movement from one budget level to another, not just by drawing horizontal lines.",
-        "Use a visible start marker for the bank's current budget and a visible target direction along the x-axis when discussing deviations.",
-        "For a small move away from the initial budget, first reveal the red loss area where the friction-adjusted threshold dominates the effective marginal value.",
-        "Then extend the target farther and reveal the green gain area, so the audience sees how a larger move can dominate the earlier local loss.",
-        "Pause after the red-only stage and again after the red-plus-green stage so the audience can compare local and non-local incentives.",
-        "Repeat the same logic for lending-side downward movement, so the symmetry of the argument is visible.",
-        "For the monotone rho case, emphasize that the important feature is a wide readable gap between the borrower cutoff and lender cutoff, not merely that each line is crossed once.",
-        "Use bank markers or scatter layers to show how banks move toward a point or into a band after the cutoffs are identified.",
-    )
     recipes: ExampleCurveRecipes = ExampleCurveRecipes()
-
-
-@dataclass(frozen=True, kw_only=True)
-class TieredRemunerationArtifact(VisualizationBuildArtifact):
-    spec: TieredRemunerationSpec
-    recipes: ExampleCurveRecipes
-    bundle: TieredRemunerationBundle
-
-
-def build_tiered_remuneration_packet(
-    spec: TieredRemunerationSpec | None = None,
-) -> VisualizationInstructionPacket:
-    resolved_spec = spec or TieredRemunerationSpec()
-    rates = resolved_spec.rates
-
-    return VisualizationInstructionPacket(
-        title=resolved_spec.title,
-        synopsis=(
-            "Create a tiered-remuneration visualization that starts from an increasing concave utility, "
-            "moves to its derivative, and uses remuneration schedules to explain local versus non-local deviations."
-        ),
-        target_audience=resolved_spec.target_audience,
-        curves=(
-            CurveInstruction(
-                name="u",
-                role="utility",
-                qualitative_properties=resolved_spec.utility_shape,
-                numeric_goals=("normalize to [0, 1]", "keep visually smooth"),
-                presentation_notes=(
-                    "show u on its own before introducing u'",
-                    "use u mainly to communicate concavity",
-                ),
-            ),
-            CurveInstruction(
-                name="uprime",
-                role="derivative",
-                qualitative_properties=resolved_spec.derivative_shape,
-                numeric_goals=("derive from u after rescaling",),
-                presentation_notes=("do not over-claim convexity or concavity of u'",),
-            ),
-            CurveInstruction(
-                name="rho0",
-                role="remuneration",
-                qualitative_properties=resolved_spec.rho0_shape,
-                numeric_goals=(
-                    f"make uprime + rho0 cross i + cb about {resolved_spec.rho0_crossings_upper} times",
-                    f"make uprime + rho0 cross i - cl about {resolved_spec.rho0_crossings_lower} times",
-                ),
-                presentation_notes=("use this to create non-local deviation incentives",),
-            ),
-            CurveInstruction(
-                name="rho1",
-                role="remuneration",
-                qualitative_properties=resolved_spec.rho1_shape,
-                numeric_goals=(
-                    (
-                        "place the monotone cutoffs with clear horizontal spacing, "
-                        f"roughly near x = {resolved_spec.rho1_cutoff_targets[0]:.2f} and "
-                        f"x = {resolved_spec.rho1_cutoff_targets[1]:.2f}"
-                    ),
-                ),
-                presentation_notes=(
-                    "use this to recover clean cutoffs",
-                    "single crossings come from monotonicity; the real design goal is visual separation",
-                ),
-            ),
-        ),
-        levels=(
-            LevelInstruction("i", "i", "reference interbank rate"),
-            LevelInstruction("i_plus_cb", "i + cb", "upper borrowing threshold"),
-            LevelInstruction("i_minus_cl", "i - cl", "lower lending threshold"),
-        ),
-        intersections=(
-            IntersectionInstruction(
-                left_curve="uprime",
-                right_curve="i_plus_cb",
-                desired_count=1,
-                importance="create one side of the friction band under monotone incentives",
-                location_hint="roughly left of the central budget region",
-            ),
-            IntersectionInstruction(
-                left_curve="uprime",
-                right_curve="i_minus_cl",
-                desired_count=1,
-                importance="create the other side of the friction band under monotone incentives",
-                location_hint="roughly right of the central budget region",
-            ),
-            IntersectionInstruction(
-                left_curve="uprime_plus_rho0",
-                right_curve="i_plus_cb",
-                desired_count=resolved_spec.rho0_crossings_upper,
-                importance="show that non-monotone remuneration can create multiple borrowing incentives",
-            ),
-            IntersectionInstruction(
-                left_curve="uprime_plus_rho0",
-                right_curve="i_minus_cl",
-                desired_count=resolved_spec.rho0_crossings_lower,
-                importance="show that non-monotone remuneration can create multiple lending incentives",
-            ),
-            IntersectionInstruction(
-                left_curve="uprime_plus_rho1",
-                right_curve="i_plus_cb",
-                desired_count=1,
-                importance="place the borrowing cutoff where the later band visualization stays readable",
-                location_hint=f"roughly near x = {resolved_spec.rho1_cutoff_targets[0]:.2f}",
-            ),
-            IntersectionInstruction(
-                left_curve="uprime_plus_rho1",
-                right_curve="i_minus_cl",
-                desired_count=1,
-                importance="place the lending cutoff far enough away to leave a clear inactive region",
-                location_hint=f"roughly near x = {resolved_spec.rho1_cutoff_targets[1]:.2f}",
-            ),
-        ),
-        narrative_beats=tuple(
-            NarrativeBeatInstruction(
-                title=f"Beat {index + 1}",
-                goal=beat,
-                emphasis=("slow pacing", "clear pauses"),
-            )
-            for index, beat in enumerate(resolved_spec.story_beats)
-        ),
-        animation_directives=resolved_spec.animation_directives,
-        constraints=(
-            resolved_spec.utility_guardrail,
-            "Prefer deterministic recipe-based functions over opaque hard-coded arrays.",
-            "Keep the numerical functions easy to tune for future stories.",
-            "Do not assume any decomposition into acts, scenes, or phases unless it is introduced explicitly in the planning brief.",
-        ),
-        metadata={
-            "rates": {"i": rates.i, "cb": rates.cb, "cl": rates.cl},
-            "initial_budget_x": resolved_spec.initial_budget_x,
-            "rho1_cutoff_targets": resolved_spec.rho1_cutoff_targets,
-            "target_cutoff_pair": resolved_spec.target_cutoff_pair,
-            "pacing": resolved_spec.pacing,
-            "recipes": {
-                "uprime": resolved_spec.recipes.uprime.__dict__,
-                "rho0": resolved_spec.recipes.rho0.__dict__,
-                "rho1": resolved_spec.recipes.rho1.__dict__,
-            },
-        },
-    )
-
-
-def write_tiered_remuneration_brief(
-    packet: VisualizationInstructionPacket,
-) -> NarrativeBrief:
-    rates = packet.metadata["rates"]
-    initial_budget_x = float(packet.metadata["initial_budget_x"])
-    rho1_cutoff_targets = _pair(packet.metadata["rho1_cutoff_targets"])
-    cutoff_pair = _pair(packet.metadata["target_cutoff_pair"])
-
-    return NarrativeBrief(
-        title=f"{packet.title} Builder Brief",
-        summary=(
-            "Start with a utility curve u(b) that is increasing and concave. Then move to a rescaled derivative "
-            "u'(b), introduce the friction levels i + cb and i - cl, and use remuneration schedules to explain why "
-            "non-monotone incentives can create non-local profitable deviations while monotone incentives recover a cutoff rule."
-        ),
-        builder_instructions=(
-            "Construct u indirectly by first designing a smooth positive decreasing u' and integrating it.",
-            "Use u only to communicate concavity; do not shape u' in a way that implies a second message about its own curvature.",
-            f"Use rates i={rates['i']:.2f}, cb={rates['cb']:.2f}, cl={rates['cl']:.2f}.",
-            "Choose a non-monotone rho0 so that u' + rho0 crosses both friction lines multiple times and produces visually meaningful red/green deviation regions.",
-            (
-                "Choose a monotone rho1 so that the borrowing and lending cutoffs are comfortably separated in x, "
-                f"roughly near ({rho1_cutoff_targets[0]:.2f}, {rho1_cutoff_targets[1]:.2f}), "
-                "so the later visualization has a clear borrower / inactive / lender partition."
-            ),
-            f"Keep the green initial-budget marker near b={initial_budget_x:.3f} and target final cutoffs near ({cutoff_pair[0]:.3f}, {cutoff_pair[1]:.3f}).",
-            "Return both the numeric recipes and the schedule code so the story can be edited later.",
-        ),
-        animation_plan=(
-            "Start with u(b) alone, with enough pause that the audience can register increasing concavity before any derivative appears.",
-            "Then use a split-screen style transition to explain that u is only reference context and that the decision problem is read on u'(b).",
-            "When the friction lines i + cb and i - cl appear, pause and then move sample banks or markers so the audience sees how frictions create an inaction band rather than just reading it from the lines.",
-            "For the non-monotone rho portion, start from a single green initial-budget marker and explicitly animate movement toward a candidate target budget level on the borrowing side.",
-            "On that first borrowing-side move, stop early and show only the red area so the audience sees the immediate local loss created by friction near the starting point.",
-            "Then continue moving the target farther out and reveal the green area so the audience sees how a larger move can dominate the earlier local loss and become globally profitable.",
-            "Repeat the same target-movement logic on the lending side: begin at the same initial budget, move toward a lower target, show the early red loss first, then extend to the later green gain.",
-            "For the monotone rho portion, place b_L and b_H with enough spacing that the borrower region, inactive region, and lender region are visually distinct.",
-            "Use stress and pauses after each conceptual change rather than continuous motion everywhere.",
-        ),
-        guardrails=(
-            "Prefer deterministic analytic recipes, not random seeds or opaque sampled arrays.",
-            "Pause after each conceptual shift so the audience can read the narration.",
-            "Use signed fills and marker/scatter layers when they clarify the economic story.",
-        ),
-        success_checks=(
-            "u is increasing and concave in the rendered plot.",
-            "u' + rho0 visibly has multiple intersections with the friction thresholds.",
-            "u' + rho1 has well-separated monotone cutoffs that are easy to read in the later visualization.",
-        ),
-    )
-
-
-def generated_tiered_remuneration_code(
-    spec: TieredRemunerationSpec,
-    *,
-    sample_step: int,
-) -> str:
-    rates = spec.rates
-    recipes = spec.recipes
-    return textwrap.dedent(
-        f"""
-        from tieredremuneration_support import (
-            ExampleCurveRecipes,
-            MonotoneRhoRecipe,
-            NonMonotoneRhoRecipe,
-            RateBandSpec,
-            TieredRemunerationSpec,
-            UPrimeRecipe,
-            build_tiered_remuneration_artifact,
-        )
-
-        spec = TieredRemunerationSpec(
-            title={spec.title!r},
-            target_audience={spec.target_audience!r},
-            rates=RateBandSpec(i={rates.i!r}, cb={rates.cb!r}, cl={rates.cl!r}),
-            initial_budget_x={spec.initial_budget_x!r},
-            rho1_cutoff_targets={spec.rho1_cutoff_targets!r},
-            target_cutoff_pair={spec.target_cutoff_pair!r},
-            recipes=ExampleCurveRecipes(
-                uprime=UPrimeRecipe(**{recipes.uprime.__dict__!r}),
-                rho0=NonMonotoneRhoRecipe(**{recipes.rho0.__dict__!r}),
-                rho1=MonotoneRhoRecipe(**{recipes.rho1.__dict__!r}),
-            ),
-        )
-
-        artifact = build_tiered_remuneration_artifact(spec, sample_step={sample_step})
-        bundle = artifact.bundle
-        """
-    ).strip()
-
-
-class TieredRemunerationBuilder(VisualizationBuilder):
-    def __init__(
-        self,
-        *,
-        spec: TieredRemunerationSpec | None = None,
-        sample_step: int = DEFAULT_SAMPLE_STEP,
-    ) -> None:
-        self.spec = spec or TieredRemunerationSpec()
-        self.sample_step = sample_step
-
-    def build(
-        self,
-        packet: VisualizationInstructionPacket,
-        brief: NarrativeBrief,
-    ) -> TieredRemunerationArtifact:
-        bundle = build_tiered_remuneration_bundle(
-            sample_step=self.sample_step,
-            spec=self.spec,
-            recipes=self.spec.recipes,
-        )
-        handoff = BuilderHandoff(
-            packet=packet,
-            brief=brief,
-            technical_targets=(
-                "Generate deterministic numeric functions that satisfy the crossing story.",
-                "Return an editable visualization build; if you segment it into parts, that segmentation must come from the brief rather than being assumed in advance.",
-                "Emit recipe-based Python code that can recreate the same bundle.",
-            ),
-        )
-        return TieredRemunerationArtifact(
-            packet=packet,
-            brief=brief,
-            handoff=handoff,
-            generated_code=generated_tiered_remuneration_code(
-                self.spec,
-                sample_step=self.sample_step,
-            ),
-            notes=(
-                "The generated build uses deterministic numeric recipes and remains editable.",
-                "Any segmentation of the story should come from the brief, not from hidden builder assumptions.",
-            ),
-            spec=self.spec,
-            recipes=self.spec.recipes,
-            bundle=bundle,
-        )
-
-
-def build_tiered_remuneration_pipeline(
-    spec: TieredRemunerationSpec | None = None,
-    *,
-    sample_step: int = DEFAULT_SAMPLE_STEP,
-) -> VisualizationPipeline:
-    resolved_spec = spec or TieredRemunerationSpec()
-    return VisualizationPipeline(
-        brief_writer=write_tiered_remuneration_brief,
-        builder=TieredRemunerationBuilder(
-            spec=resolved_spec,
-            sample_step=sample_step,
-        ),
-    )
-
-
-def build_tiered_remuneration_artifact(
-    spec: TieredRemunerationSpec | None = None,
-    *,
-    sample_step: int = DEFAULT_SAMPLE_STEP,
-) -> TieredRemunerationArtifact:
-    resolved_spec = spec or TieredRemunerationSpec()
-    packet = build_tiered_remuneration_packet(resolved_spec)
-    pipeline = build_tiered_remuneration_pipeline(
-        resolved_spec,
-        sample_step=sample_step,
-    )
-    artifact = pipeline.run(packet)
-    assert isinstance(artifact, TieredRemunerationArtifact)
-    return artifact
-
-
-def export_tiered_remuneration_prompts(
-    spec: TieredRemunerationSpec | None = None,
-    output_dir: str | Path = "notebooks/prompts/tieredremuneration",
-    *,
-    sample_step: int = DEFAULT_SAMPLE_STEP,
-) -> dict[str, Path]:
-    artifact = build_tiered_remuneration_artifact(spec, sample_step=sample_step)
-    return export_instruction_prompts(
-        artifact.packet,
-        brief=artifact.brief,
-        handoff=artifact.handoff,
-        output_dir=output_dir,
-        prefix="tieredremuneration",
-    )
-
-
-def planner_from_scratch_prompt(packet: VisualizationInstructionPacket) -> str:
-    return "\n".join(
-        [
-            "You are the planner agent for a from-scratch visualization build.",
-            "Use only `packet.md` in this workspace.",
-            "Do not inspect the original tiered-remuneration notebook, support file, or previous implementation.",
-            "Your job is to turn the packet into a detailed natural-language brief that the builder can follow from scratch.",
-            "The brief must explain the mathematical story, the animation beats, the purpose of the pauses, and how friction should be visualized when moving from one budget level to another.",
-            "Do not introduce structural labels such as acts, scenes, or phases unless you explicitly decide that they help the builder and you state them in the brief.",
-            "Write your output into `planner_brief.md`.",
-            "",
-            packet.to_markdown(),
-        ]
-    )
-
-
-def builder_from_scratch_prompt() -> str:
-    return "\n".join(
-        [
-            "You are the builder agent for a from-scratch visualization build.",
-            "Use only `packet.md` and `planner_brief.md` in this workspace.",
-            "Do not inspect the original tiered-remuneration notebook, support file, or previous implementation.",
-            "Create the numerical functions and the visualization code from scratch.",
-            "Do not assume acts, scenes, or phases unless `planner_brief.md` explicitly introduces them.",
-            "Write a readable implementation into `builder_output/visualization_builder.py`.",
-            "Write a short explanation of the numerical choices and animation logic into `builder_output/visualization_notes.md`.",
-            "The output should be deterministic and easy to tune later.",
-        ]
-    )
-
-
-def prepare_tiered_remuneration_from_scratch_workspace(
-    spec: TieredRemunerationSpec | None = None,
-    output_dir: str | Path = FROM_SCRATCH_WORKSPACE_DIR,
-) -> dict[str, Path]:
-    resolved_spec = spec or TieredRemunerationSpec()
-    packet = build_tiered_remuneration_packet(resolved_spec)
-
-    base_dir = Path(output_dir)
-    builder_output_dir = base_dir / "builder_output"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    builder_output_dir.mkdir(parents=True, exist_ok=True)
-
-    readme_path = base_dir / "README.md"
-    packet_path = base_dir / "packet.md"
-    planner_prompt_path = base_dir / "planner_system_prompt.md"
-    planner_brief_path = base_dir / "planner_brief.md"
-    builder_prompt_path = base_dir / "builder_system_prompt.md"
-    builder_code_path = builder_output_dir / "visualization_builder.py"
-    builder_notes_path = builder_output_dir / "visualization_notes.md"
-
-    readme_path.write_text(
-        textwrap.dedent(
-            """
-            # Tiered Remuneration From-Scratch Workspace
-
-            This workspace is for a staged agent workflow:
-
-            1. The instruction maker may inspect the existing tiered-remuneration materials and produce `packet.md`.
-            2. The planner agent should read only `packet.md` and write `planner_brief.md`.
-            3. The builder agent should read only `packet.md` and `planner_brief.md`, then create the implementation in `builder_output/`.
-
-            Intended discipline:
-
-            - Do not use the old notebook or support module during the planner or builder stages.
-            - Work from scratch using only the files in this folder.
-            - Keep the implementation deterministic and editable.
-            - The planner defines the animation structure. The builder should not assume structural labels that are absent from `planner_brief.md`.
-
-            Important limitation:
-
-            - This repository setup cannot technically sandbox file reads for local agents.
-            - Operationally, enforce isolation by spawning planner and builder agents without forked context and providing only these files.
-            """
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    packet_path.write_text(packet.to_markdown(), encoding="utf-8")
-    planner_prompt_path.write_text(planner_from_scratch_prompt(packet), encoding="utf-8")
-    planner_brief_path.write_text(
-        textwrap.dedent(
-            """
-            # Planner Brief
-
-            Write the builder-facing brief here.
-            Only introduce labels such as acts, scenes, or phases if you want the builder to use them.
-            """
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    builder_prompt_path.write_text(builder_from_scratch_prompt(), encoding="utf-8")
-    builder_code_path.write_text(
-        textwrap.dedent(
-            """
-            # Write the from-scratch implementation here.
-            """
-        ).lstrip(),
-        encoding="utf-8",
-    )
-    builder_notes_path.write_text(
-        textwrap.dedent(
-            """
-            # Builder Notes
-
-            Explain the chosen numerical functions, cutoffs, and animation logic here.
-            """
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    return {
-        "readme": readme_path,
-        "packet": packet_path,
-        "planner_prompt": planner_prompt_path,
-        "planner_brief": planner_brief_path,
-        "builder_prompt": builder_prompt_path,
-        "builder_code": builder_code_path,
-        "builder_notes": builder_notes_path,
-    }
 
 
 def build_tiered_remuneration_bundle(
@@ -657,6 +178,12 @@ def build_tiered_remuneration_bundle(
         recipes=resolved_recipes,
         rates=resolved_spec.rates,
         initial_budget_x=resolved_spec.initial_budget_x,
+        borrow_demo_start_x=resolved_spec.borrow_demo_start_x,
+        borrow_demo_near_x=resolved_spec.borrow_demo_near_x,
+        borrow_demo_far_x=resolved_spec.borrow_demo_far_x,
+        lend_demo_start_x=resolved_spec.lend_demo_start_x,
+        lend_demo_near_x=resolved_spec.lend_demo_near_x,
+        lend_demo_far_x=resolved_spec.lend_demo_far_x,
         rho1_cutoff_targets=resolved_spec.rho1_cutoff_targets,
         target_cutoff_pair=resolved_spec.target_cutoff_pair,
     )
@@ -672,11 +199,11 @@ def build_tiered_remuneration_bundle(
 
     acts: OrderedDict[str, Schedule] = OrderedDict(
         [
-            ("Act 1", retime_schedule(act_1)),
-            ("Act 2", retime_schedule(act_2)),
-            ("Act 3", retime_schedule(act_3)),
-            ("Act 4", retime_schedule(act_4)),
-            ("Act 5", retime_schedule(act_5)),
+            ("Utility to Derivative", retime_schedule(act_1)),
+            ("Friction and Remuneration", retime_schedule(act_2)),
+            ("Non-Monotone Deviations", retime_schedule(act_3)),
+            ("Monotone Cutoffs", retime_schedule(act_4)),
+            ("Two-Tier Construction", retime_schedule(act_5)),
         ]
     )
 
@@ -695,6 +222,12 @@ def build_data(
     recipes: ExampleCurveRecipes | None = None,
     rates: RateBandSpec | None = None,
     initial_budget_x: float = 0.565,
+    borrow_demo_start_x: float = 0.46,
+    borrow_demo_near_x: float = 0.54,
+    borrow_demo_far_x: float = 0.76,
+    lend_demo_start_x: float = 0.78,
+    lend_demo_near_x: float = 0.66,
+    lend_demo_far_x: float = 0.44,
     rho1_cutoff_targets: tuple[float, float] = (0.30, 0.70),
     target_cutoff_pair: tuple[float, float] = (0.405, 0.500),
 ) -> tuple[np.ndarray, dict[str, np.ndarray | float | int]]:
@@ -727,6 +260,12 @@ def build_data(
     data["i_plus_cb"] = float(data["i"]) + float(data["cb"])
     data["i_minus_cl"] = float(data["i"]) - float(data["cl"])
     data["initial_budget_x"] = float(initial_budget_x)
+    data["borrow_demo_start_x"] = float(borrow_demo_start_x)
+    data["borrow_demo_near_x"] = float(borrow_demo_near_x)
+    data["borrow_demo_far_x"] = float(borrow_demo_far_x)
+    data["lend_demo_start_x"] = float(lend_demo_start_x)
+    data["lend_demo_near_x"] = float(lend_demo_near_x)
+    data["lend_demo_far_x"] = float(lend_demo_far_x)
     data["rho1_cutoff_targets"] = tuple(float(value) for value in rho1_cutoff_targets)
     data["target_cutoff_pair"] = tuple(float(value) for value in target_cutoff_pair)
 
@@ -1235,7 +774,9 @@ def build_act_3(
     )
     schedule.add(Stress("uprime_plus_rho", glow_color="#111827", glow_width=10.0), duration=0.6)
 
-    start_index = _closest_index(x, _scalar(data["initial_budget_x"]))
+    borrow_start_index = _closest_index(x, _scalar(data["borrow_demo_start_x"]))
+    borrow_near_index = _closest_index(x, _scalar(data["borrow_demo_near_x"]))
+    borrow_far_index = _closest_index(x, _scalar(data["borrow_demo_far_x"]))
     borrow_crossings = level_crossings(
         x,
         _array(data["uprime_plus_rho0"]),
@@ -1243,25 +784,21 @@ def build_act_3(
     )
     borrow_entry_index = borrow_crossings[1].right_index
     borrow_exit_index = borrow_crossings[2].left_index
-    borrow_loss_pause = area_fraction_index(
-        x,
-        _scalar(data["i_plus_cb"]) - _array(data["uprime_plus_rho0"]),
-        start=start_index,
-        stop=borrow_entry_index,
-        fraction=0.62,
+    if not borrow_start_index < borrow_near_index < borrow_entry_index < borrow_far_index < borrow_exit_index:
+        raise ValueError("Borrowing demo points must lie away from the upper-threshold intersections.")
+    schedule.add(
+        Parallel(
+            (
+                Draw(point_marker("initial_budget", float(x[borrow_start_index]), float(_array(data["uprime_plus_rho0"])[borrow_start_index]), color="green", marker=6, markersize=10.0)),
+                Draw(point_marker("borrow_target", float(x[borrow_near_index]), float(_array(data["uprime_plus_rho0"])[borrow_near_index]), color="#2563eb", marker=">", markersize=10.0)),
+            )
+        ),
+        duration=0.0,
     )
-    borrow_gain_pause = area_fraction_index(
-        x,
-        _array(data["uprime_plus_rho0"]) - _scalar(data["i_plus_cb"]),
-        start=borrow_entry_index,
-        stop=borrow_exit_index,
-        fraction=0.42,
-    )
-    schedule.add(Draw(point_marker("initial_budget", float(x[start_index]), float(_array(data["uprime_plus_rho0"])[start_index]), color="green", marker=6, markersize=10.0)), duration=0.0)
     replace_narration(
         schedule,
         r"Consider a bank starting from the green triangle.",
-        r"Small borrowing first creates losses, shown by the red area.",
+        r"The blue marker stays away from the crossings, so the local borrowing loss is easy to see.",
         draw_duration=1.0,
         hold_duration=0.6,
     )
@@ -1271,8 +808,8 @@ def build_act_3(
             x,
             _array(data["uprime_plus_rho0"]),
             _scalar(data["i_plus_cb"]),
-            start=start_index,
-            stop=borrow_loss_pause,
+            start=borrow_start_index,
+            stop=borrow_near_index,
             color="red",
         ),
         duration=1.0,
@@ -1289,12 +826,13 @@ def build_act_3(
     _add_transitions(
         schedule,
         [
+            Move("borrow_target", newx=[float(x[borrow_far_index])], newy=[float(_array(data["uprime_plus_rho0"])[borrow_far_index])]),
             region_fill(
                 "borrow_red_2",
                 x,
                 _array(data["uprime_plus_rho0"]),
                 _scalar(data["i_plus_cb"]),
-                start=max(start_index, borrow_loss_pause - 1),
+                start=borrow_near_index,
                 stop=borrow_entry_index,
                 color="red",
             ),
@@ -1303,24 +841,11 @@ def build_act_3(
                 x,
                 _array(data["uprime_plus_rho0"]),
                 _scalar(data["i_plus_cb"]),
-                start=max(start_index, borrow_entry_index - 1),
-                stop=borrow_gain_pause,
+                start=borrow_entry_index,
+                stop=borrow_far_index,
                 color="green",
             ),
         ],
-        duration=1.0,
-    )
-    schedule.add_break(0.5)
-    schedule.add(
-        region_fill(
-            "borrow_green_2",
-            x,
-            _array(data["uprime_plus_rho0"]),
-            _scalar(data["i_plus_cb"]),
-            start=max(borrow_entry_index, borrow_gain_pause - 1),
-            stop=borrow_exit_index,
-            color="green",
-        ),
         duration=1.0,
     )
     schedule.add_break(1.0)
@@ -1329,10 +854,10 @@ def build_act_3(
     _add_transitions(
         schedule,
         [
-            EraseFillBetween("borrow_green_2", direction="backward"),
             EraseFillBetween("borrow_green_1", direction="backward"),
             EraseFillBetween("borrow_red_2", direction="backward"),
             EraseFillBetween("borrow_red_1", direction="backward"),
+            Erase("borrow_target"),
         ],
         duration=0.8,
     )
@@ -1340,7 +865,7 @@ def build_act_3(
     replace_narration(
         schedule,
         r"The same non-monotonicity shows up on the lending side.",
-        r"Again, locally unprofitable moves can be dominated by larger gains later on.",
+        r"Again we keep both the start and target away from the crossings, so the red local loss and green later gain stay readable.",
         draw_duration=1.0,
         hold_duration=0.5,
     )
@@ -1351,20 +876,44 @@ def build_act_3(
     )
     lend_entry_index = lend_crossings[0].right_index
     lend_exit_index = lend_crossings[1].left_index
-    lend_lower_bound_index = _closest_index(x, 0.01)
+    lend_start_index = _closest_index(x, _scalar(data["lend_demo_start_x"]))
+    lend_near_index = _closest_index(x, _scalar(data["lend_demo_near_x"]))
+    lend_far_index = _closest_index(x, _scalar(data["lend_demo_far_x"]))
+    if not lend_entry_index < lend_far_index < lend_exit_index < lend_near_index < lend_start_index:
+        raise ValueError("Lending demo points must lie away from the lower-threshold intersections.")
     _add_transitions(
         schedule,
         [
+            Move("initial_budget", newx=[float(x[lend_start_index])], newy=[float(_array(data["uprime_plus_rho0"])[lend_start_index])]),
+            Draw(point_marker("lend_target", float(x[lend_near_index]), float(_array(data["uprime_plus_rho0"])[lend_near_index]), color="#2563eb", marker="<", markersize=10.0)),
+            region_fill(
+                "lend_red_1",
+                x,
+                _array(data["uprime_plus_rho0"]),
+                _scalar(data["i_minus_cl"]),
+                start=lend_near_index,
+                stop=lend_start_index,
+                color="red",
+                direction="backward",
+            ),
+        ],
+        duration=1.0,
+    )
+    schedule.add_break(0.6)
+    _add_transitions(
+        schedule,
+        [
+            Move("lend_target", newx=[float(x[lend_far_index])], newy=[float(_array(data["uprime_plus_rho0"])[lend_far_index])]),
             region_fill(
                 "lend_signed",
                 x,
                 _array(data["uprime_plus_rho0"]),
                 _scalar(data["i_minus_cl"]),
-                start=lend_lower_bound_index,
-                stop=start_index,
+                start=lend_far_index,
+                stop=lend_near_index,
                 color="red",
-                positive_color="green",
-                negative_color="red",
+                positive_color="red",
+                negative_color="green",
                 direction="backward",
             ),
         ],
@@ -1376,7 +925,9 @@ def build_act_3(
     _add_transitions(
         schedule,
         [
+            EraseFillBetween("lend_red_1"),
             EraseFillBetween("lend_signed"),
+            Erase("lend_target"),
             Erase("initial_budget"),
         ],
         duration=0.9,
@@ -1408,9 +959,9 @@ def build_act_4(
             TextStyle("rho_label", alpha=1.0),
             Move("rho", newy=_array(data["rho1"])),
             Move("uprime_plus_rho", newy=_array(data["uprime_plus_rho1"])),
-            MoveText("rho_label", newx=0.29, newy=0.075),
-            MoveText("uprime_plus_rho_label", newx=0.96, newy=0.05),
-            MoveText("uprime_label", newx=0.29, newy=0.272),
+            MoveText("rho_label", newx=0.20, newy=0.16),
+            MoveText("uprime_plus_rho_label", newx=0.90, newy=0.03),
+            MoveText("uprime_label", newx=0.23, newy=0.31),
         ],
         duration=1.1,
     )
@@ -2047,12 +1598,13 @@ def region_fill(
     alpha: float = 0.3,
     direction: str = "forward",
 ) -> FillBetween:
-    x_slice = x_values[start:stop]
-    upper_slice = upper_values[start:stop]
+    stop_index = min(int(stop) + 1, x_values.size)
+    x_slice = x_values[start:stop_index]
+    upper_slice = upper_values[start:stop_index]
     if np.isscalar(lower_values):
         lower_slice = lower_values
     else:
-        lower_slice = lower_values[start:stop]
+        lower_slice = lower_values[start:stop_index]
 
     return FillBetween(
         FillBetweenArea(
@@ -2157,12 +1709,13 @@ def export_video_bundle(
     exported: dict[str, Path] = {}
     act_videos: list[Path] = []
 
-    for index, (act_name, schedule) in enumerate(bundle.acts.items(), start=1):
-        video_path = output_path / f"tieredremuneration_act_{index}.mp4"
-        exported[act_name] = save_schedule_video(
+    for section_name, schedule in bundle.acts.items():
+        slug = f"tieredremuneration_{_slugify_title(section_name)}"
+        video_path = output_path / f"{slug}.mp4"
+        exported[section_name] = save_schedule_video(
             schedule,
             video_path,
-            title=act_name,
+            title=section_name,
             fps=fps,
             dpi=dpi,
         )
@@ -2204,22 +1757,22 @@ def export_bundle_artifacts(
     video_exports: OrderedDict[str, Path] = OrderedDict()
     act_videos: list[Path] = []
 
-    for index, (act_name, schedule) in enumerate(bundle.acts.items(), start=1):
-        slug = f"tieredremuneration_act_{index}"
-        html_exports[act_name] = save_schedule_html(
+    for section_name, schedule in bundle.acts.items():
+        slug = f"tieredremuneration_{_slugify_title(section_name)}"
+        html_exports[section_name] = save_schedule_html(
             schedule,
             html_dir / f"{slug}.html",
-            title=act_name,
+            title=section_name,
             fps=html_fps,
         )
         video_path = save_schedule_video(
             schedule,
             video_dir / f"{slug}.mp4",
-            title=act_name,
+            title=section_name,
             fps=video_fps,
             dpi=dpi,
         )
-        video_exports[act_name] = video_path
+        video_exports[section_name] = video_path
         act_videos.append(video_path)
 
     combined_video = concatenate_videos(
@@ -2242,7 +1795,6 @@ def concatenate_videos(video_paths: Sequence[Path], output_path: str | Path) -> 
         "\n".join(f"file '{video_path.resolve()}'" for video_path in video_paths),
         encoding="utf-8",
     )
-
     subprocess.run(
         [
             "ffmpeg",
@@ -2264,6 +1816,11 @@ def concatenate_videos(video_paths: Sequence[Path], output_path: str | Path) -> 
         text=True,
     )
     return output
+
+
+def _slugify_title(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+    return slug or "section"
 
 
 def make_figure() -> tuple[plt.Figure, plt.Axes]:

@@ -21,6 +21,7 @@ Curves, fills, and text can use arbitrary finite plot coordinates.
 - concurrent transitions with `Parallel`
 - style changes for color, alpha, linewidth, and linestyle
 - transient emphasis effects like stress glow and jitter
+- internal reveal pauses for draw/fill/scatter transitions
 - support for pre-populated initial scenes
 - act-based composition via `final_scene`, `next_act()`, and `Schedule.combine(...)`
 - automatic axis fitting for arbitrary coordinate ranges
@@ -77,7 +78,9 @@ schedule.add(
                     color="#99f6e4",
                     alpha=0.35,
                     linewidth=0.0,
-                )
+                ),
+                pause_at=0.45,
+                pause_for=0.18,
             ),
         )
     ),
@@ -109,6 +112,21 @@ schedule.add_break(0.75)
 # or
 schedule.pause(0.75)
 ```
+
+Pause partway through a reveal transition:
+
+```python
+schedule.add(
+    Draw(
+        Curve("wave", x, y, color="#0f766e", linewidth=3.0),
+        pause_at=[0.35, 0.72],
+        pause_for=[0.12, 0.08],
+    ),
+    duration=1.8,
+)
+```
+
+`pause_at` uses reveal progress values in `[0, 1]`, and `pause_for` uses fractions of that transition's own duration. So `pause_at=0.5, pause_for=0.2` means “reveal halfway, hold there for 20% of this transition, then continue.”
 
 Build animation in modular acts:
 
@@ -298,48 +316,11 @@ fill = FillBetweenArea(
 
 For lines, geometry outside the window is hidden and the visible parts are split into separate segments. For fills, `x` is masked by `domain` and `y` values are clipped into `value_range`.
 
-## Instruction Pipeline
-
-The library now includes lightweight handoff objects for multi-stage visualization design:
-
-- `VisualizationInstructionPacket`: structured requirements for what the visualization should show
-- `NarrativeBrief`: the planner agent's natural-language description of the story and numeric goals
-- `BuilderHandoff`: the packet + brief passed to the builder
-- `VisualizationPipeline`: a small orchestrator that runs `packet -> brief -> build`
-
-Tiered remuneration uses that pattern in [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) with:
-
-- `TieredRemunerationSpec`
-- `build_tiered_remuneration_packet(...)`
-- `write_tiered_remuneration_brief(...)`
-- `build_tiered_remuneration_artifact(...)`
-
-Example:
-
-```python
-from tieredremuneration_support import (
-    TieredRemunerationSpec,
-    build_tiered_remuneration_artifact,
-    build_tiered_remuneration_packet,
-    write_tiered_remuneration_brief,
-)
-
-spec = TieredRemunerationSpec()
-packet = build_tiered_remuneration_packet(spec)
-brief = write_tiered_remuneration_brief(packet)
-artifact = build_tiered_remuneration_artifact(spec, sample_step=12)
-
-print(packet.to_markdown())
-print(brief.as_text())
-bundle = artifact.bundle
-```
-
 ## Notebook Demos
 
 - [`notebooks/basic_demo.ipynb`](notebooks/basic_demo.ipynb): local repo version with basic drawing, styling, clipping, modular scheduling, and combined-transition examples
 - [`notebooks/basic_demo_colab.ipynb`](notebooks/basic_demo_colab.ipynb): Colab-ready version that installs the package from GitHub in the setup cell
 - [`notebooks/tieredremuneration.ipynb`](notebooks/tieredremuneration.ipynb): cleaned five-act notebook that uses [`notebooks/tieredremuneration_support.py`](notebooks/tieredremuneration_support.py) for the narrative animation; it previews acts at a low HTML frame rate and exports per-act plus combined MP4 artifacts at a higher video frame rate
-- [`notebooks/tieredremuneration_pipeline_demo.py`](notebooks/tieredremuneration_pipeline_demo.py): script that shows the `spec -> packet -> brief -> artifact` flow directly
 
 ## Publishing
 
